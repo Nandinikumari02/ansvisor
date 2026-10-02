@@ -696,7 +696,7 @@ function NoDataForPeriod({ datePreset, onReset }: { datePreset: DatePreset; onRe
  *  card expands + scrolls itself for this hash; the prompt-suggestions card
  *  lives on the Prompts page's default All Prompts tab and does the same. */
 const TOPIC_OPPORTUNITIES_HREF = '/dashboard/topics#topic-opportunities';
-const PROMPT_OPPORTUNITIES_HREF = '/dashboard/prompts?tab=suggestions';
+const PROMPT_OPPORTUNITIES_HREF = '/dashboard/prompts?tab=all&view=suggestions';
 
 function RecommendationCard({
   title,
