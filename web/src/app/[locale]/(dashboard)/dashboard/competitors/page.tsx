@@ -14,6 +14,9 @@ import {
 } from '@/lib/actions/tracking';
 import type { HeadToHeadData, HeadToHeadGroup, HeadToHeadRun } from '@/lib/head-to-head';
 import { getFaviconUrl } from '@/lib/favicon';
+import { toCsv } from '@/lib/csv';
+import { slugify } from '@/lib/slug';
+import { readUrlParam, writeUrlParams } from '@/lib/url-state';
 import { MODEL_LABELS } from '@/config/platform-labels';
 import type { Competitor } from '@/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -59,6 +62,7 @@ import {
   ShieldAlert,
   ChevronDown,
   Eye,
+  Download,
 } from 'lucide-react';
 
 // ─── Shared Visual Components (mirroring Insights) ───────────────────────────
@@ -1156,8 +1160,43 @@ function last30Days() {
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
+const BENCHMARK_EXPORT_HEADERS = [
+  'name',
+  'is_own_brand',
+  'visibility_score',
+  'visible_prompts',
+  'prompt_count',
+  'mention_answers',
+  'citation_answers',
+  'mentions',
+  'citations',
+];
+
+const HEAD_TO_HEAD_EXPORT_HEADERS = [
+  'prompt',
+  'platform',
+  'model',
+  'region',
+  'runs',
+  'brand_score',
+  'competitor_score',
+  'difference',
+  'latest_at',
+];
+
+function downloadCsv(csv: string, fileName: string) {
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function CompetitorsPage() {
   const t = useTranslations('competitors');
+  const common = useTranslations('common');
   const { canUse, isCloud } = useFeatureGate();
   const brand = useBrandStore((s) => s.getActiveBrand());
 
@@ -1170,6 +1209,19 @@ export default function CompetitorsPage() {
 
   // Head-to-head
   const [selectedCompetitorId, setSelectedCompetitorId] = useState<string | null>(null);
+  // ?competitor=<id> (#893): the head-to-head selection survives a refresh and
+  // can be linked to, e.g. from the Insights leaderboard. Read after mount;
+  // applied once the brand's competitors are known, so an unknown id is ignored.
+  const [linkedCompetitorId, setLinkedCompetitorId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLinkedCompetitorId(readUrlParam('competitor') || null);
+  }, []);
+
+  const selectCompetitor = useCallback((id: string | null) => {
+    setSelectedCompetitorId(id);
+    writeUrlParams({ competitor: id });
+  }, []);
   const [h2hData, setH2hData] = useState<HeadToHeadData | null>(null);
   const [h2hLoading, setH2hLoading] = useState(false);
 
@@ -1196,6 +1248,14 @@ export default function CompetitorsPage() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    if (!linkedCompetitorId || loading) return;
+    selectCompetitor(
+      competitors.some((c) => c.id === linkedCompetitorId) ? linkedCompetitorId : null,
+    );
+    setLinkedCompetitorId(null);
+  }, [linkedCompetitorId, loading, competitors, selectCompetitor]);
 
   // Load head-to-head when a competitor is selected
   const loadH2H = useCallback(
@@ -1293,7 +1353,7 @@ export default function CompetitorsPage() {
       await deleteCompetitor(id);
       toast.success(t('deleteSuccess'));
       if (selectedCompetitorId === id) {
-        setSelectedCompetitorId(null);
+        selectCompetitor(null);
       }
       loadData();
     } catch {
@@ -1304,6 +1364,45 @@ export default function CompetitorsPage() {
   }
 
   const selectedCompetitor = competitors.find((c) => c.id === selectedCompetitorId);
+  const today = new Date().toISOString().slice(0, 10);
+
+  function exportBenchmark() {
+    if (!brand || !comparisonData?.brands.length) return;
+    const rows = comparisonData.brands.map((e) => ({
+      name: e.name,
+      is_own_brand: e.isOwnBrand,
+      visibility_score: e.score ?? '',
+      visible_prompts: e.visiblePrompts,
+      prompt_count: e.promptCount,
+      mention_answers: e.mentionAnswers,
+      citation_answers: e.citationAnswers,
+      mentions: e.totalMentions,
+      citations: e.totalCitations,
+    }));
+    downloadCsv(
+      toCsv(rows, BENCHMARK_EXPORT_HEADERS),
+      `ansvisor_${brand.slug}_competitors_${today}.csv`,
+    );
+  }
+
+  function exportHeadToHead() {
+    if (!brand || !h2hData?.groups.length || !selectedCompetitor) return;
+    const rows = h2hData.groups.map((g) => ({
+      prompt: g.promptText,
+      platform: g.platform,
+      model: g.modelUsed,
+      region: g.region ?? '',
+      runs: g.runs,
+      brand_score: g.brandScore,
+      competitor_score: g.competitorScore,
+      difference: g.diff,
+      latest_at: g.latestAt,
+    }));
+    downloadCsv(
+      toCsv(rows, HEAD_TO_HEAD_EXPORT_HEADERS),
+      `ansvisor_${brand.slug}_head-to-head_${slugify(selectedCompetitor.name)}_${today}.csv`,
+    );
+  }
 
   if (loading) {
     return (
@@ -1340,13 +1439,25 @@ export default function CompetitorsPage() {
           {/* Competitor List */}
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Users className="h-4 w-4" />
-                {t('trackedCompetitors')}
-                <Badge variant="secondary" className="text-xs">
-                  {competitors.length}
-                </Badge>
-              </CardTitle>
+              <div className="flex items-center justify-between gap-2">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Users className="h-4 w-4" />
+                  {t('trackedCompetitors')}
+                  <Badge variant="secondary" className="text-xs">
+                    {competitors.length}
+                  </Badge>
+                </CardTitle>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-2"
+                  onClick={exportBenchmark}
+                  disabled={!comparisonData?.brands.length}
+                >
+                  <Download className="h-4 w-4" />
+                  {common('exportCsv')}
+                </Button>
+              </div>
               <p className="text-xs text-muted-foreground">
                 {t('selectToCompare')} {t('windowLast30Days')}
               </p>
@@ -1360,7 +1471,7 @@ export default function CompetitorsPage() {
                     stats={scoreMap.get(comp.name) ?? null}
                     isSelected={selectedCompetitorId === comp.id}
                     onSelect={() =>
-                      setSelectedCompetitorId(selectedCompetitorId === comp.id ? null : comp.id)
+                      selectCompetitor(selectedCompetitorId === comp.id ? null : comp.id)
                     }
                     onDelete={() => setConfirmDelete(comp)}
                     deleting={deleting === comp.id}
@@ -1381,6 +1492,16 @@ export default function CompetitorsPage() {
                     competitor: selectedCompetitor?.name ?? '',
                   })}
                 </h2>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="ml-auto gap-2"
+                  onClick={exportHeadToHead}
+                  disabled={h2hLoading || !h2hData?.groups.length}
+                >
+                  <Download className="h-4 w-4" />
+                  {common('exportCsv')}
+                </Button>
               </div>
 
               {h2hLoading ? (
