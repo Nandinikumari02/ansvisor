@@ -1,5 +1,6 @@
 'use server';
 
+import { unstable_cache } from 'next/cache';
 import { dbClient, withDbClient } from '@/lib/supabase/scoped';
 import { expandDateToEndOfDay } from '@/lib/dates';
 import { computeAiVisibilityScore } from '@/lib/visibility-score';
@@ -28,6 +29,14 @@ import { getPromptSuggestions } from '@/lib/actions/prompt-suggestions';
 import { aggregatePromptVolumeClusters } from '@/lib/prompt-volume-clusters';
 import { percentageChange } from '@/lib/metrics';
 import { PLATFORM_LABELS } from '@/config/platform-labels';
+import {
+  aggregateHeadToHead,
+  competitorScoreIn,
+  emptyHeadToHead,
+  type HeadToHeadData,
+  type HeadToHeadResultRow,
+  type HeadToHeadRun,
+} from '@/lib/head-to-head';
 
 /** Round to one decimal place (keeps sub-1 averages visible instead of flooring to 0). */
 function roundTo1(n: number): number {
@@ -704,6 +713,10 @@ export interface InsightsData {
   filterOptions: InsightsFilterOptions;
   recommendations: InsightsRecommendations;
   hasAnyData: boolean;
+  /** The visibility-rate chart for the same window; null when its read failed. */
+  trend: VisibilityRateTrendData | null;
+  /** The run ledger, when the 24h window was anchored to it (`anchor24h`). */
+  trackingWindow: TrackingWindow | null;
 }
 
 export interface TrackingWindow {
@@ -785,6 +798,114 @@ export async function getTrackingWindow(brandId: string): Promise<TrackingWindow
  * The raw prompt_results rows are no longer part of the payload — the
  * "Prompt Results by Topic" tree they fed was removed in #458.
  */
+/** The part of the Insights page that depends only on the brand and the window. */
+type WindowedInsights = Pick<
+  InsightsData,
+  'summary' | 'competitors' | 'sov' | 'visibilityRate' | 'filterOptions' | 'trend'
+>;
+
+type InsightsFilterArgs = {
+  model?: string;
+  region?: string;
+  topicId?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  days?: DayWindow;
+};
+
+const EMPTY_COMPETITORS: CompetitorComparisonData = { brands: [], providerRows: [] };
+const EMPTY_SOV: ShareOfVoiceData = {
+  overallSov: 0,
+  overallSovChange: null,
+  byPlatform: [],
+  trend: [],
+};
+
+/**
+ * Read the windowed sections in parallel. Lenient mode is the page's normal
+ * behaviour: a competitor, SoV or trend error costs its own card (the empty
+ * shapes are what the page maps to "section hidden"), while the summary and
+ * KPI reads stay fatal. Strict mode lets every error through, so a result
+ * with a silently emptied section is never cached.
+ */
+async function loadWindowedInsights(
+  brandId: string,
+  filterOpts: InsightsFilterArgs,
+  { strict }: { strict: boolean },
+): Promise<WindowedInsights> {
+  const lenient = <T>(promise: Promise<T>, fallback: T, label: string): Promise<T> =>
+    strict
+      ? promise
+      : promise.catch((err) => {
+          console.error(`[insights] ${label} failed`, err);
+          return fallback;
+        });
+
+  const [summary, competitors, sov, visibilityRate, filterOptions, trend] = await Promise.all([
+    getInsightsSummary(brandId, filterOpts),
+    lenient(
+      getCompetitorComparison(brandId, filterOpts),
+      EMPTY_COMPETITORS,
+      'competitor comparison',
+    ),
+    lenient(getShareOfVoiceData(brandId, filterOpts), EMPTY_SOV, 'share of voice'),
+    getVisibilityRateKpi(brandId, filterOpts),
+    getInsightsFilterOptions(brandId),
+    // The chart follows the same window as every other number on the page.
+    lenient<VisibilityRateTrendData | null>(
+      getVisibilityRateTrend(brandId, filterOpts),
+      null,
+      'visibility trend',
+    ),
+  ]);
+  return { summary, competitors, sov, visibilityRate, filterOptions, trend };
+}
+
+/**
+ * The anchored 24h view only changes when a tracking run completes, yet each
+ * page open recomputed it from raw results: ~10 reads over the same answers,
+ * 6-8 s on the largest brand once they contend. Cache it per brand, filters
+ * and anchored window; the next completed run moves the window and so the key.
+ *
+ * Computed with the service-role client because the cache cannot read the
+ * caller's cookies; every loader scopes its reads by brand, and the caller's
+ * access to the brand is checked on each call before the cache is read.
+ */
+async function cachedAnchoredInsights(
+  brandId: string,
+  filterOpts: InsightsFilterArgs,
+  anchored: { dateFrom: string; dateTo: string },
+): Promise<WindowedInsights> {
+  const { data: brand, error } = await (await dbClient())
+    .from('brands')
+    .select('id')
+    .eq('id', brandId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!brand) throw new Error('Brand not found');
+
+  // Imported here: the admin client is created at module load and needs the
+  // service-role env, which only this path uses.
+  const { supabaseAdmin } = await import('@/lib/supabase/admin');
+  const compute = unstable_cache(
+    () =>
+      withDbClient(supabaseAdmin as unknown as Awaited<ReturnType<typeof dbClient>>, () =>
+        loadWindowedInsights(brandId, filterOpts, { strict: true }),
+      ),
+    [
+      'insights-24h',
+      brandId,
+      anchored.dateFrom,
+      anchored.dateTo,
+      filterOpts.model ?? '',
+      filterOpts.region ?? '',
+      filterOpts.topicId ?? '',
+    ],
+    { revalidate: 2 * 24 * 60 * 60, tags: [`insights:${brandId}`] },
+  );
+  return compute();
+}
+
 export async function getInsightsData(
   brandId: string,
   opts: {
@@ -796,67 +917,55 @@ export async function getInsightsData(
     days?: DayWindow;
     /** When the current view is filtered, check unfiltered data existence too. */
     checkUnfiltered?: boolean;
+    /**
+     * The 24h preset: anchor dateFrom/dateTo to the last completed tracking
+     * run (see getTrackingWindow). Resolved here rather than by a separate
+     * client call, because each server action is its own queued request.
+     */
+    anchor24h?: boolean;
   },
 ): Promise<InsightsData> {
-  const filterOpts = {
+  const trackingWindow = opts.anchor24h ? await getTrackingWindow(brandId).catch(() => null) : null;
+  const anchored = trackingWindow?.anchored ?? null;
+
+  const filterOpts: InsightsFilterArgs = {
     model: opts.model,
     region: opts.region,
     topicId: opts.topicId,
-    dateFrom: opts.dateFrom,
-    dateTo: opts.dateTo,
+    dateFrom: anchored?.dateFrom ?? opts.dateFrom,
+    dateTo: anchored?.dateTo ?? opts.dateTo,
     days: opts.days,
   };
 
-  // The two heavyweight sections degrade instead of failing the page: a
-  // competitor or SoV error costs its own card, never the KPI header. Their
-  // empty shapes are exactly what the page already maps to "section hidden"
-  // (brands.length <= 1, byPlatform.length === 0). The summary and KPI reads
-  // stay fatal — the page is meaningless without them, and on the rollup
-  // path they are the cheap ones.
-  const [
-    summary,
-    competitors,
-    sov,
-    trackedPrompts,
-    visibilityRate,
-    filterOptions,
-    recommendations,
-    unfilteredHasData,
-  ] = await Promise.all([
-    getInsightsSummary(brandId, filterOpts),
-    getCompetitorComparison(brandId, filterOpts).catch((err) => {
-      console.error('[insights] competitor comparison failed', err);
-      return { brands: [], providerRows: [] } satisfies CompetitorComparisonData;
-    }),
-    getShareOfVoiceData(brandId, filterOpts).catch((err) => {
-      console.error('[insights] share of voice failed', err);
-      return {
-        overallSov: 0,
-        overallSovChange: null,
-        byPlatform: [],
-        trend: [],
-      } satisfies ShareOfVoiceData;
-    }),
+  // An anchored window is served from the cache; a failure there (including a
+  // section that would have degraded) falls back to the live, lenient read.
+  const windowedRead = anchored
+    ? cachedAnchoredInsights(brandId, filterOpts, anchored).catch((err) => {
+        console.error('[insights] cached 24h read failed, reading live', err);
+        return loadWindowedInsights(brandId, filterOpts, { strict: false });
+      })
+    : loadWindowedInsights(brandId, filterOpts, { strict: false });
+
+  // Quota (tracked prompts), recommendations and the unfiltered check depend
+  // on the caller's org and session, so they are read live on every open.
+  const [windowed, trackedPrompts, recommendations, unfilteredHasData] = await Promise.all([
+    windowedRead,
     getTrackedPromptsKpi(brandId, filterOpts),
-    getVisibilityRateKpi(brandId, filterOpts),
-    getInsightsFilterOptions(brandId),
     getInsightsRecommendations(brandId),
     opts.checkUnfiltered ? brandHasResults(brandId) : Promise.resolve(null),
   ]);
 
   // insights_aggregates counts the same filtered set the summary shows, so it
   // stands in for the removed results fetch when no unfiltered check ran.
-  const hasAnyData = unfilteredHasData !== null ? unfilteredHasData : summary.totalResults > 0;
+  const hasAnyData =
+    unfilteredHasData !== null ? unfilteredHasData : windowed.summary.totalResults > 0;
 
   return {
-    summary,
-    competitors,
-    sov,
+    ...windowed,
     trackedPrompts,
-    visibilityRate,
-    filterOptions,
     recommendations,
     hasAnyData,
+    trackingWindow,
   };
 }
 
@@ -980,9 +1089,12 @@ export async function getPromptResultById(resultId: string): Promise<PromptResul
     .select('*')
     .eq('id', resultId)
     .neq('platform', 'chatgpt-shopping')
-    .single();
+    .maybeSingle();
 
-  if (error || !data) return null;
+  // A failed read throws, so the page can offer a retry instead of reporting
+  // the result as missing.
+  if (error) throw new Error(error.message);
+  if (!data) return null;
 
   const row = data as Record<string, unknown>;
   const { data: promptData } = await supabase
@@ -1842,6 +1954,8 @@ export interface CompetitorComparisonEntry {
   totalCitations: number;
   resultCount: number;
   isOwnBrand: boolean;
+  /** The competitor's id; absent on the brand's own entry. */
+  competitorId?: string;
 }
 
 export interface ProviderComparisonRow {
@@ -2113,6 +2227,7 @@ export async function getCompetitorComparison(
       totalCitations: c.total_citations,
       resultCount: c.row_count,
       isOwnBrand: false,
+      competitorId: c.competitor_id,
     });
   }
 
@@ -2633,46 +2748,11 @@ export async function getVisibilityRateTrend(
 
 // ─── Head-to-Head Competitor Comparison ─────────────────────────────────────
 
-export interface HeadToHeadPromptRow {
-  resultId: string;
-  promptId: string;
-  promptText: string;
-  promptCategory?: string;
-  brandScore: number;
-  competitorScore: number;
-  diff: number;
-  platform: string;
-  modelUsed: string;
-  region?: string;
-  response: string;
-  citations: Citation[];
-  sentiment: Sentiment;
-  brandMentionCount: number;
-  brandCitationCount: number;
-  compMentionCount: number;
-  compCitationCount: number;
-  createdAt: string;
-}
-
-export interface HeadToHeadPlatformRow {
-  platform: string;
-  brandScore: number;
-  competitorScore: number;
-  diff: number;
-}
-
-export interface HeadToHeadData {
-  promptRows: HeadToHeadPromptRow[];
-  platformRows: HeadToHeadPlatformRow[];
-  brandAvg: number;
-  competitorAvg: number;
-  gaps: HeadToHeadPromptRow[];
-  strengths: HeadToHeadPromptRow[];
-}
-
 /**
- * Compare a brand vs a single competitor prompt-by-prompt.
- * Returns per-prompt scores, per-platform breakdown, gaps and strengths.
+ * Compare a brand vs a single competitor (#923): one summary per (prompt,
+ * engine, model, region), the per-engine breakdown, and the largest gaps and
+ * strengths. A group's individual runs load separately via
+ * `getHeadToHeadRuns`, so no answer text is sent up front.
  */
 export async function getHeadToHeadComparison(
   brandId: string,
@@ -2682,132 +2762,79 @@ export async function getHeadToHeadComparison(
 
   // #155 — head-to-head comparisons are a Competitors-tab feature, which
   // also lives under Insights — same isolation rule applies here.
+  // Still a single page of raw results (PostgREST caps it at 1,000), so
+  // large brands are summarised from their newest answers only; #923 moves
+  // this onto the daily rollups.
   const { data: results, error } = await supabase
     .from('prompt_results')
-    .select('*')
+    .select(
+      'prompt_id, platform, model_used, region, visibility_score, competitor_mentions, created_at',
+    )
     .eq('brand_id', brandId)
     .neq('platform', 'chatgpt-shopping')
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false });
 
   if (error) throw new Error(error.message);
-  const rows = (results ?? []) as Record<string, unknown>[];
-  if (rows.length === 0) {
-    return {
-      promptRows: [],
-      platformRows: [],
-      brandAvg: 0,
-      competitorAvg: 0,
-      gaps: [],
-      strengths: [],
-    };
-  }
+  const rows = (results ?? []) as HeadToHeadResultRow[];
+  if (rows.length === 0) return emptyHeadToHead();
 
-  const promptIds = [...new Set(rows.map((r) => r.prompt_id as string))];
+  const promptIds = [...new Set(rows.map((r) => r.prompt_id).filter((id): id is string => !!id))];
   const { data: promptData } =
     promptIds.length > 0
       ? await supabase.from('prompts').select('id, text, category').in('id', promptIds)
       : { data: [] };
-  const promptMap = new Map(
+  const prompts = new Map(
     (promptData ?? []).map((p) => [
-      p.id,
-      {
-        text: p.text as string,
-        category: (p.category as string | null) ?? undefined,
-      },
+      p.id as string,
+      { text: p.text as string, category: (p.category as string | null) ?? undefined },
     ]),
   );
 
-  const promptRows: HeadToHeadPromptRow[] = [];
+  return aggregateHeadToHead(rows, competitorId, prompts, resolveProvider);
+}
 
-  type PlatAgg = {
-    brandTotal: number;
-    brandCount: number;
-    compTotal: number;
-    compCount: number;
-  };
-  const platMap = new Map<string, PlatAgg>();
+/**
+ * The individual runs behind one head-to-head group, newest first, loaded when
+ * the user opens the group. Bounded by `limit` (max 100).
+ */
+export async function getHeadToHeadRuns(
+  brandId: string,
+  competitorId: string,
+  group: {
+    promptId: string;
+    rawPlatform: string | null;
+    rawModelUsed: string | null;
+    region: string | null;
+  },
+  limit = 50,
+): Promise<HeadToHeadRun[]> {
+  const supabase = await dbClient();
 
-  let brandTotalScore = 0;
-  let brandCount = 0;
-  let compTotalScore = 0;
-  let compCount = 0;
+  let query = supabase
+    .from('prompt_results')
+    .select('id, created_at, visibility_score, sentiment, competitor_mentions')
+    .eq('brand_id', brandId)
+    .eq('prompt_id', group.promptId);
+  query = group.rawPlatform ? query.eq('platform', group.rawPlatform) : query.is('platform', null);
+  query = group.rawModelUsed
+    ? query.eq('model_used', group.rawModelUsed)
+    : query.is('model_used', null);
+  query = group.region ? query.eq('region', group.region) : query.is('region', null);
 
-  for (const row of rows) {
-    const brandScore = row.visibility_score as number;
-    const platform = resolveProvider(
-      row.model_used as string | null,
-      row.platform as string | null,
-    );
-    const mentions = (row.competitor_mentions as CompetitorMention[] | null) ?? [];
-    const comp = mentions.find((cm) => cm.competitor_id === competitorId);
-    const compScore = comp?.visibility_score ?? 0;
+  const { data, error } = await query
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(Math.min(Math.max(limit, 1), 100));
+  if (error) throw new Error(error.message);
 
-    const pm = promptMap.get(row.prompt_id as string);
-
-    const modelUsed = (row.model_used as string | null) ?? '';
-
-    promptRows.push({
-      resultId: row.id as string,
-      promptId: row.prompt_id as string,
-      promptText: pm?.text ?? '',
-      promptCategory: pm?.category,
-      brandScore,
-      competitorScore: compScore,
-      diff: brandScore - compScore,
-      platform,
-      modelUsed,
-      region: (row.region as string | null) ?? undefined,
-      response: (row.response as string) ?? '',
-      citations: (row.citations as Citation[]) ?? [],
-      sentiment: (row.sentiment as Sentiment) ?? 'neutral',
-      brandMentionCount: row.mention_count as number,
-      brandCitationCount: row.citation_count as number,
-      compMentionCount: comp?.mention_count ?? 0,
-      compCitationCount: comp?.citation_count ?? 0,
-      createdAt: row.created_at as string,
-    });
-
-    brandTotalScore += brandScore;
-    brandCount += 1;
-    if (comp) {
-      compTotalScore += compScore;
-      compCount += 1;
-    }
-
-    const pa = platMap.get(platform) ?? {
-      brandTotal: 0,
-      brandCount: 0,
-      compTotal: 0,
-      compCount: 0,
-    };
-    pa.brandTotal += brandScore;
-    pa.brandCount += 1;
-    if (comp) {
-      pa.compTotal += compScore;
-      pa.compCount += 1;
-    }
-    platMap.set(platform, pa);
-  }
-
-  const platformRows: HeadToHeadPlatformRow[] = [...platMap.entries()]
-    .map(([platform, a]) => {
-      const bs = a.brandCount > 0 ? Math.round(a.brandTotal / a.brandCount) : 0;
-      const cs = a.compCount > 0 ? Math.round(a.compTotal / a.compCount) : 0;
-      return { platform, brandScore: bs, competitorScore: cs, diff: bs - cs };
-    })
-    .sort((a, b) => a.platform.localeCompare(b.platform));
-
-  const brandAvg = brandCount > 0 ? Math.round(brandTotalScore / brandCount) : 0;
-  const competitorAvg = compCount > 0 ? Math.round(compTotalScore / compCount) : 0;
-
-  const sorted = [...promptRows].sort((a, b) => a.diff - b.diff);
-  const gaps = sorted.filter((r) => r.diff < 0).slice(0, 10);
-  const strengths = sorted
-    .filter((r) => r.diff > 0)
-    .reverse()
-    .slice(0, 10);
-
-  return { promptRows, platformRows, brandAvg, competitorAvg, gaps, strengths };
+  return (data ?? []).map((row) => ({
+    resultId: row.id as string,
+    createdAt: row.created_at as string,
+    brandScore: (row.visibility_score as number | null) ?? 0,
+    competitorScore: competitorScoreIn(row.competitor_mentions, competitorId) ?? 0,
+    sentiment: ((row.sentiment as Sentiment | null) ?? 'neutral') as Sentiment,
+  }));
 }
 
 // ─── Insights Metric Breakdown (Root-Cause Drilldown) ─────────────────────────

@@ -423,7 +423,7 @@ export default function NewBrandPage() {
 
         if (!profile?.organization_id) throw new Error('No organization found');
 
-        const brand = await createBrand({
+        const result = await createBrand({
           organizationId: profile.organization_id,
           name: brandName.trim(),
           description: description.trim() || undefined,
@@ -432,6 +432,11 @@ export default function NewBrandPage() {
           language,
           domains: domain ? [{ domain, isPrimary: true }] : [],
         });
+        if ('error' in result) {
+          toast.error(result.error);
+          return;
+        }
+        const { brand } = result;
 
         setCreatedBrand(brand);
         addBrand(brand);
@@ -589,6 +594,7 @@ export default function NewBrandPage() {
         description: description.trim(),
         website: domain,
         language,
+        region,
       });
       setSuggestedCompetitors((prev) => mergeCompetitorSuggestions(prev, competitors));
     } catch (err) {

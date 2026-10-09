@@ -96,6 +96,21 @@ export function getPlatformName(platform: string): string {
   return PLATFORM_NAMES[platform] ?? platform;
 }
 
+/**
+ * Options of the platform filter, with an empty-valued "all" option first. Base UI's Select can only
+ * show the label of the picked option in its trigger when it is given the options as `items`;
+ * without them the trigger shows the raw value, the platform's domain (for example `chatgpt.com`).
+ */
+export function getPlatformFilterItems(
+  platforms: string[],
+  allLabel: string,
+): { value: string; label: string }[] {
+  return [
+    { value: '', label: allLabel },
+    ...platforms.map((platform) => ({ value: platform, label: getPlatformName(platform) })),
+  ];
+}
+
 function formatTrafficBucketDate(value: string): string {
   const d = new Date(value);
 

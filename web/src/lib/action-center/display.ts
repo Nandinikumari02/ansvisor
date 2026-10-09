@@ -66,6 +66,10 @@ export function actionTexts(
   if (!isActionKind(action.kind)) {
     return { title: humanizeKind(action.kind), description: t('unknown.description') };
   }
+  // An action sent from a content opportunity is named after the work itself.
+  if (action.kind === 'content_opportunity' && typeof p.title === 'string' && p.title) {
+    return { title: p.title, description: t(`${action.kind}.description`) };
+  }
   const targets = targetLabel(p, t);
   return {
     title: targets ? t(`${action.kind}.title`, { targets }) : t(`${action.kind}.titleGeneric`),
@@ -104,7 +108,10 @@ export function actionGoal(kind: string, t: Translator): string {
 /** Compact evidence chips under the title: signal count plus the kind's own
  *  count (pages, prompts, competitors). */
 export function actionContextTags(action: ActionItem, t: Translator): string[] {
-  const tags = [t('tags.signals', { count: action.signalCount })];
+  // An action sent from a content opportunity has no detection signals by
+  // design; "0 signals" would read as missing evidence.
+  const tags =
+    action.kind === 'content_opportunity' ? [] : [t('tags.signals', { count: action.signalCount })];
   const count = num(action.payload ?? {}, 'targetCount');
   const entity = str(action.payload ?? {}, 'targetEntity');
   if (count > 0 && entity) tags.push(t(`tags.${entity}`, { count }));

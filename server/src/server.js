@@ -19,7 +19,7 @@ import {
   cleanupOldJobs,
   cleanupStalePendingTasks,
 } from './lib/job-manager.js';
-import { runTrackingJob } from './lib/job-runner.js';
+import { runTrackingJob, recoverWaitingJobs } from './lib/job-runner.js';
 import { sweepInsightsRollups } from './lib/insights-rollups.js';
 import { sweepActionValidation } from './lib/action-center/validate.js';
 import { parseScraperResponse } from './lib/cloro-scraper.js';
@@ -38,6 +38,7 @@ import { runPageOpportunityDetection } from './lib/page-opportunities.js';
 import { runPulseCatchUp } from './lib/pulse/engine.js';
 import { runSignalCatchUp } from './lib/signals/pass.js';
 import { sweepTaskExecution } from './lib/action-center/execution/run.js';
+import { sendHealthReport } from './lib/health/report.js';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -248,6 +249,19 @@ async function runDailyTracking() {
 
   return { triggered, total: brands.length };
 }
+
+// --- Daily health report (CRON_SECRET auth, Vercel Cron) ---
+// Answers at once and reports in the background: timing the page reads can
+// take longer than a cron request may stay open.
+app.post('/api/internal/health-report', (req, res) => {
+  const secret = req.headers.authorization?.replace('Bearer ', '');
+  if (!process.env.CRON_SECRET || secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ success: false, message: 'Unauthorized' });
+  }
+
+  sendHealthReport().catch((err) => logger.error({ err }, '[health] daily report failed'));
+  return res.status(202).json({ success: true });
+});
 
 // --- Internal cron endpoint (CRON_SECRET auth, used by Vercel Cron in cloud mode) ---
 app.post('/api/internal/daily-tracking', async (req, res) => {
@@ -556,19 +570,38 @@ app.post('/cloro/callback', async (req, res) => {
       domain: c.domain || '',
     }));
 
-    const aiResponse = parseScraperResponse(response, pending.scraper_id);
+    // A completed task with nothing to store — google-aio for a query Google
+    // shows no AI Overview for — is a finished task, not a failed delivery.
+    // Leaving its pending row behind held every tracking run open: the worker
+    // waited out its stall window and the run's stamp its late deadline, for
+    // answers that had arrived seconds after submission.
+    let aiResponse;
+    try {
+      aiResponse = parseScraperResponse(response, pending.scraper_id);
+    } catch (err) {
+      req.log.info(
+        { taskId, scraperId: pending.scraper_id, reason: err.message },
+        'cloro callback: task completed with no answer to store',
+      );
+      await supabaseAdmin.from('cloro_pending_tasks').delete().eq('task_id', taskId);
+      return;
+    }
 
-    await handleScraperResult({
-      aiResponse,
-      scraperId: pending.scraper_id,
-      promptId: pending.prompt_id,
-      brandId: pending.brand_id,
-      region: pending.region,
-      brandInfo,
-      competitors,
-    });
-
-    await supabaseAdmin.from('cloro_pending_tasks').delete().eq('task_id', taskId);
+    try {
+      await handleScraperResult({
+        aiResponse,
+        scraperId: pending.scraper_id,
+        promptId: pending.prompt_id,
+        brandId: pending.brand_id,
+        region: pending.region,
+        brandInfo,
+        competitors,
+      });
+    } finally {
+      // Cloro does not deliver again after our 200, so a task that failed to
+      // store will never come back; keeping its row only holds the run open.
+      await supabaseAdmin.from('cloro_pending_tasks').delete().eq('task_id', taskId);
+    }
 
     req.log.info(
       { taskId, scraperId: pending.scraper_id },
@@ -609,8 +642,27 @@ const PORT = process.env.PORT || 80;
 server.listen(PORT, async () => {
   logger.info({ port: PORT, env: process.env.NODE_ENV }, 'server running');
 
+  // Startup job maintenance acts on every job in the database: it fails all
+  // 'active' jobs as interrupted, deletes old Cloro tasks and takes over
+  // 'waiting' jobs. Only the deployed server owns those. A development
+  // server pointed at the production database (nodemon restarting on every
+  // save) was failing the live nightly runs in the middle of their work.
+  // Keyed on 'development' rather than on 'production', so a deployment
+  // whose env file leaves NODE_ENV unset still runs it.
+  if (process.env.NODE_ENV === 'development') {
+    logger.info('development: skipping job cleanup, recovery and the daily cron');
+    return;
+  }
+
   await cleanupStaleJobs();
   await cleanupStalePendingTasks();
+
+  // The job queue lives in memory: restart waiting jobs whose run chain was
+  // lost (a restart, an error before they got a slot), now and every minute.
+  const recover = () =>
+    recoverWaitingJobs(io).catch((err) => logger.error({ err }, 'waiting-job recovery failed'));
+  await recover();
+  setInterval(recover, 60_000);
 
   if (!isCloud()) {
     const schedule = process.env.DAILY_CRON_SCHEDULE || '0 6 * * *';

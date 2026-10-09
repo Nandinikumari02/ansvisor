@@ -1,7 +1,7 @@
 'use server';
 
 import { createClient } from '@/lib/supabase/server';
-import type { ContentBrief, ContentOpportunity, WebhookConfig } from '@/types';
+import type { ContentBrief, ContentOpportunity, OpportunityBasket, WebhookConfig } from '@/types';
 import { API_BASE_URL } from '@/config/api';
 
 const AEO_SERVER_URL = API_BASE_URL;
@@ -84,6 +84,7 @@ export async function getOpportunities(
     q?: string;
     type?: string;
     promptId?: string;
+    topicId?: string;
     limit?: number;
     offset?: number;
     sort?: string;
@@ -95,6 +96,7 @@ export async function getOpportunities(
     avgScore: number;
     highImpactCount: number;
     sentCount: number;
+    signalCount: number;
   };
 }> {
   const session = await getSession();
@@ -105,6 +107,7 @@ export async function getOpportunities(
   if (filters?.q) params.set('q', filters.q);
   if (filters?.type) params.set('type', filters.type);
   if (filters?.promptId) params.set('prompt_id', filters.promptId);
+  if (filters?.topicId) params.set('topic_id', filters.topicId);
   if (filters?.limit) params.set('limit', String(filters.limit));
   if (filters?.offset) params.set('offset', String(filters.offset));
   if (filters?.sort) params.set('sort', filters.sort);
@@ -150,10 +153,114 @@ export async function getOpportunityPrompts(brandId: string): Promise<Opportunit
   return body.prompts;
 }
 
+export async function sendOpportunityToActionCenter(
+  id: string,
+  assetKey?: string,
+): Promise<{ actionId: string; created: boolean } | { error: string }> {
+  const session = await getSession();
+
+  const res = await fetch(`${AEO_SERVER_URL}/api/content/${id}/action`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({ assetKey: assetKey ?? null }),
+  });
+
+  // Returned, not thrown: a thrown error's message is masked in production.
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    return { error: body.details || body.error || `Server error: ${res.status}` };
+  }
+  return res.json();
+}
+
+export interface OpportunityActionResult {
+  id: string;
+  actionNo: number;
+  title: string | null;
+  status: string;
+  outcome: string;
+  completedAt: string | null;
+  validatedAt: string | null;
+  metrics: { metric: string; unit: string; before: number | null; after: number | null }[];
+}
+
+/**
+ * The Action Center actions sent from an opportunity, with what they measured.
+ * Read with the user's session, so RLS keeps it to their organization.
+ */
+export async function getOpportunityActions(ids: string[]): Promise<OpportunityActionResult[]> {
+  if (!ids.length) return [];
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from('actions')
+    .select('id, action_no, status, outcome, completed_at, validated_at, validation, payload')
+    .in('id', ids)
+    .order('created_at');
+  if (error) throw new Error(error.message);
+  return (data ?? []).map((row) => {
+    const payload = (row.payload ?? {}) as { title?: string };
+    const validation = (row.validation ?? null) as {
+      metrics?: OpportunityActionResult['metrics'];
+    } | null;
+    return {
+      id: row.id,
+      actionNo: Number(row.action_no),
+      title: payload.title ?? null,
+      status: row.status,
+      outcome: row.outcome,
+      completedAt: row.completed_at,
+      validatedAt: row.validated_at,
+      metrics: validation?.metrics ?? [],
+    };
+  });
+}
+
+export interface OpportunityTopic {
+  topicId: string;
+  name: string;
+  count: number;
+}
+
+export async function getOpportunityTopics(brandId: string): Promise<OpportunityTopic[]> {
+  const session = await getSession();
+
+  const res = await fetch(`${AEO_SERVER_URL}/api/content/brand/${brandId}/topics`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${session.access_token}` },
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Server error: ${res.status}`);
+  }
+
+  const body = (await res.json()) as { topics: OpportunityTopic[] };
+  return body.topics;
+}
+
 export async function getOpportunity(id: string): Promise<ContentOpportunity> {
   const session = await getSession();
 
   const res = await fetch(`${AEO_SERVER_URL}/api/content/${id}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${session.access_token}` },
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Server error: ${res.status}`);
+  }
+
+  return res.json();
+}
+
+export async function getOpportunityBasket(id: string): Promise<OpportunityBasket> {
+  const session = await getSession();
+
+  const res = await fetch(`${AEO_SERVER_URL}/api/content/${id}/basket`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${session.access_token}` },
   });

@@ -56,6 +56,7 @@ import {
   X,
   Settings2,
   Trash2,
+  Download,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useBrandStore } from '@/stores/use-brand-store';
@@ -65,7 +66,9 @@ import {
   getGenerationJobStatus,
   getOpportunities,
   getOpportunityPrompts,
+  getOpportunityTopics,
   type OpportunityPrompt,
+  type OpportunityTopic,
   updateOpportunityStatus,
   sendToWebhook,
   bulkSendToWebhook,
@@ -76,9 +79,43 @@ import type { ContentOpportunity, ContentOpportunityStatus } from '@/types';
 import { toast } from 'sonner';
 import { Link } from '@/i18n/navigation';
 import { WebhookSettingsDialog } from './_webhook-settings';
+import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet';
+import { OpportunityDetail } from '@/components/content/opportunity-detail';
 import { PAGE_SIZE, TablePager, usePagination } from '@/components/table-pager';
+import { toCsv } from '@/lib/csv';
+import { readUrlChoice, writeUrlParams } from '@/lib/url-state';
 
 const GENERATION_STORAGE_KEY = 'aeo:content-generation';
+
+// Filters and sort kept in the URL (#897); defaults are left out of it.
+const STATUS_VALUES = [
+  'all',
+  'new',
+  'reviewed',
+  'sent',
+  'in_progress',
+  'done',
+  'dismissed',
+  'archived',
+] as const;
+const IMPACT_VALUES = ['all', 'high', 'medium', 'low'] as const;
+const TYPE_VALUES = ['all', 'owned', 'earned'] as const;
+const SORT_VALUES = ['score', 'newest'] as const;
+const URL_DEFAULTS = { status: 'all', impact: 'all', type: 'all', sort: 'score' };
+
+const OPPORTUNITY_EXPORT_HEADERS = [
+  'title',
+  'type',
+  'impact',
+  'score',
+  'status',
+  'related_prompt',
+  'created_at',
+];
+// The export pages through the filtered list; the cap keeps a runaway brand
+// from pinning the browser.
+const EXPORT_PAGE_SIZE = 200;
+const EXPORT_MAX_ROWS = 10_000;
 const GENERATION_TIMEOUT_MS = 3 * 60 * 1000;
 
 interface GenerationJob {
@@ -122,10 +159,12 @@ const IMPACT_COLORS: Record<string, string> = {
 
 const STATUS_COLORS: Record<string, string> = {
   new: 'border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-400',
+  reviewed: 'border-sky-500/30 bg-sky-500/10 text-sky-600 dark:text-sky-400',
   sent: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
   in_progress: 'border-violet-500/30 bg-violet-500/10 text-violet-600 dark:text-violet-400',
   done: 'border-green-500/30 bg-green-500/10 text-green-600 dark:text-green-400',
   dismissed: 'border-zinc-500/30 bg-zinc-500/10 text-zinc-500 dark:text-zinc-400',
+  archived: 'border-zinc-500/30 bg-zinc-500/5 text-zinc-500 dark:text-zinc-400',
 };
 
 function KpiCard({
@@ -168,18 +207,21 @@ export default function ContentPage() {
   const t = useTranslations('content');
   const tCommon = useTranslations('common');
   const activeBrandId = useBrandStore((s) => s.activeBrandId);
+  const activeBrandSlug = useBrandStore((s) => s.getActiveBrand()?.slug);
   const { isCloud } = usePlanContext();
 
   const [opportunities, setOpportunities] = useState<ContentOpportunity[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [sendingId, setSendingId] = useState<string | null>(null);
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [impactFilter, setImpactFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
+  const [sortOrder, setSortOrder] = useState<string>('score');
   // The prompt filter (#836) lives in the URL as ?prompt=<id> so a filtered
   // view can be linked to. It is read after mount — useSearchParams would need
   // a Suspense boundary around the page — and loading waits for it, so a
@@ -188,6 +230,9 @@ export default function ContentPage() {
   const [urlRead, setUrlRead] = useState(false);
   // null until loaded for the current brand.
   const [promptOptions, setPromptOptions] = useState<OpportunityPrompt[] | null>(null);
+  // Topic filter (#857): matches opportunities through their clusters.
+  const [topicFilter, setTopicFilter] = useState('');
+  const [topicOptions, setTopicOptions] = useState<OpportunityTopic[]>([]);
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkSending, setBulkSending] = useState(false);
@@ -199,6 +244,7 @@ export default function ContentPage() {
     avgScore: 0,
     highImpactCount: 0,
     sentCount: 0,
+    signalCount: 0,
   });
 
   // Server-side paging (#610) — the list can hold far more than one page's
@@ -206,8 +252,29 @@ export default function ContentPage() {
   // pager instead of the length of whatever page happens to be loaded.
   const pager = usePagination(
     total,
-    `${statusFilter}|${impactFilter}|${typeFilter}|${promptFilter}|${debouncedSearch}`,
+    `${statusFilter}|${impactFilter}|${typeFilter}|${promptFilter}|${topicFilter}|${debouncedSearch}|${sortOrder}`,
   );
+
+  // The list's filters and search, shared by the page load and the CSV export.
+  const listFilters = useMemo(() => {
+    const filters: Record<string, string> = {};
+    if (statusFilter !== 'all') filters.status = statusFilter;
+    if (impactFilter !== 'all') filters.impact = impactFilter;
+    if (typeFilter !== 'all') filters.type = typeFilter;
+    if (promptFilter) filters.promptId = promptFilter;
+    if (topicFilter) filters.topicId = topicFilter;
+    if (debouncedSearch.trim()) filters.q = debouncedSearch.trim();
+    filters.sort = sortOrder;
+    return filters;
+  }, [
+    statusFilter,
+    impactFilter,
+    typeFilter,
+    promptFilter,
+    topicFilter,
+    debouncedSearch,
+    sortOrder,
+  ]);
 
   const loadData = useCallback(
     async (silent = false, isCancelled?: () => boolean) => {
@@ -219,6 +286,7 @@ export default function ContentPage() {
           avgScore: 0,
           highImpactCount: 0,
           sentCount: 0,
+          signalCount: 0,
         });
         setLoading(false);
         return;
@@ -227,20 +295,10 @@ export default function ContentPage() {
       if (!silent) setLoading(true);
       setSelectedIds(new Set());
       try {
-        const filters: Record<string, string> = {};
-        if (statusFilter !== 'all') filters.status = statusFilter;
-        if (impactFilter !== 'all') filters.impact = impactFilter;
-        if (typeFilter !== 'all') filters.type = typeFilter;
-        if (promptFilter) filters.promptId = promptFilter;
-        if (debouncedSearch.trim()) {
-          filters.q = debouncedSearch.trim();
-        }
-
         const data = await getOpportunities(activeBrandId, {
-          ...filters,
+          ...listFilters,
           limit: PAGE_SIZE,
           offset: pager.start,
-          sort: 'score',
         });
         if (isCancelled?.()) return;
         setOpportunities(data.opportunities);
@@ -250,6 +308,7 @@ export default function ContentPage() {
             avgScore: 0,
             highImpactCount: 0,
             sentCount: 0,
+            signalCount: 0,
           },
         );
         return data.total;
@@ -263,17 +322,7 @@ export default function ContentPage() {
         }
       }
     },
-    [
-      urlRead,
-      activeBrandId,
-      statusFilter,
-      impactFilter,
-      typeFilter,
-      promptFilter,
-      pager.start,
-      debouncedSearch,
-      t,
-    ],
+    [urlRead, activeBrandId, listFilters, pager.start, t],
   );
 
   useEffect(() => {
@@ -284,9 +333,38 @@ export default function ContentPage() {
     return () => clearTimeout(timer);
   }, [search]);
 
+  // The open opportunity lives in the URL (?opportunity=<id>), like the
+  // Action Center's drawers: a refresh or a shared link reopens it, and
+  // opening one never navigates away from the filtered list.
+  const [openOpportunityId, setOpenOpportunityId] = useState<string | null>(null);
+
   useEffect(() => {
-    setPromptFilter(new URLSearchParams(window.location.search).get('prompt') ?? '');
+    const params = new URLSearchParams(window.location.search);
+    setPromptFilter(params.get('prompt') ?? '');
+    setOpenOpportunityId(params.get('opportunity'));
+    setStatusFilter(readUrlChoice('status', STATUS_VALUES, 'all'));
+    setImpactFilter(readUrlChoice('impact', IMPACT_VALUES, 'all'));
+    setTypeFilter(readUrlChoice('type', TYPE_VALUES, 'all'));
+    setSortOrder(readUrlChoice('sort', SORT_VALUES, 'score'));
     setUrlRead(true);
+  }, []);
+
+  // Keep the filters and sort in the URL once it has been read, so a refresh
+  // or a shared link restores the same view.
+  useEffect(() => {
+    if (!urlRead) return;
+    writeUrlParams(
+      { status: statusFilter, impact: impactFilter, type: typeFilter, sort: sortOrder },
+      URL_DEFAULTS,
+    );
+  }, [urlRead, statusFilter, impactFilter, typeFilter, sortOrder]);
+
+  const selectOpportunity = useCallback((opportunityId: string | null) => {
+    setOpenOpportunityId(opportunityId);
+    const url = new URL(window.location.href);
+    if (opportunityId) url.searchParams.set('opportunity', opportunityId);
+    else url.searchParams.delete('opportunity');
+    window.history.replaceState(window.history.state, '', url);
   }, []);
 
   const selectPrompt = useCallback((promptId: string) => {
@@ -319,6 +397,20 @@ export default function ContentPage() {
       cancelled = true;
     };
   }, [loadPromptOptions]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setTopicFilter('');
+    setTopicOptions([]);
+    if (!activeBrandId) return;
+    getOpportunityTopics(activeBrandId)
+      .then((options) => !cancelled && setTopicOptions(options))
+      // Like the prompt filter, it just stays hidden without its options.
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeBrandId]);
 
   // A prompt id from another brand, or one whose prompt was deleted, would
   // filter to nothing while the picker shows "All prompts". Drop it.
@@ -395,6 +487,50 @@ export default function ContentPage() {
       pollRef.current = false;
     };
   }, [activeBrandId, pollJob]);
+
+  // Every opportunity matching the filters and search, not just this page (#915).
+  const handleExportCsv = async () => {
+    if (!activeBrandId) return;
+    setExporting(true);
+    try {
+      const rows: ContentOpportunity[] = [];
+      for (let offset = 0; offset < EXPORT_MAX_ROWS; offset += EXPORT_PAGE_SIZE) {
+        const page = await getOpportunities(activeBrandId, {
+          ...listFilters,
+          limit: EXPORT_PAGE_SIZE,
+          offset,
+        });
+        rows.push(...page.opportunities);
+        if (page.opportunities.length < EXPORT_PAGE_SIZE) break;
+      }
+
+      const csv = toCsv(
+        rows.map((o) => ({
+          title: o.title,
+          type: o.type,
+          impact: o.impact,
+          score: Math.round(o.opportunityScore),
+          status: o.status,
+          related_prompt: o.sourceData.promptText ?? (o.sourceData.prompts ?? []).join(' | '),
+          created_at: o.createdAt,
+        })),
+        OPPORTUNITY_EXPORT_HEADERS,
+      );
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const date = new Date().toISOString().slice(0, 10);
+      link.href = url;
+      link.download = `ansvisor_${activeBrandSlug ?? 'brand'}_content-opportunities_${date}.csv`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to export opportunities:', err);
+      toast.error(t('exportError'));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const handleGenerate = async () => {
     if (!activeBrandId) return;
@@ -554,6 +690,7 @@ export default function ContentPage() {
     impactFilter !== 'all' ||
     typeFilter !== 'all' ||
     promptFilter !== '' ||
+    topicFilter !== '' ||
     search.trim() !== '';
 
   const clearFilters = () => {
@@ -561,6 +698,7 @@ export default function ContentPage() {
     setImpactFilter('all');
     setTypeFilter('all');
     selectPrompt('');
+    setTopicFilter('');
     setSearch('');
   };
 
@@ -580,6 +718,20 @@ export default function ContentPage() {
           <p className="text-muted-foreground text-sm">{t('description')}</p>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            onClick={handleExportCsv}
+            disabled={exporting || loading || total === 0}
+            variant="outline"
+            size="sm"
+            className="gap-2"
+          >
+            {exporting ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Download className="h-4 w-4" />
+            )}
+            {tCommon('exportCsv')}
+          </Button>
           <Button
             onClick={() => setWebhookOpen(true)}
             variant="outline"
@@ -646,7 +798,11 @@ export default function ContentPage() {
               title={t('kpi.total')}
               icon={Lightbulb}
               value={total}
-              sub={t('kpi.shown', { count: filtered.length })}
+              sub={
+                aggregates.signalCount > 0
+                  ? t('kpi.fromSignals', { count: aggregates.signalCount })
+                  : t('kpi.shown', { count: filtered.length })
+              }
             />
             <KpiCard
               title={t('kpi.highImpact')}
@@ -691,50 +847,44 @@ export default function ContentPage() {
                       className="pl-8 h-8 text-xs"
                     />
                   </div>
-                  <Select value={statusFilter} onValueChange={(v) => v && setStatusFilter(v)}>
-                    <SelectTrigger className="h-8 w-[130px] text-xs">
-                      <SelectValue>
-                        {(value) =>
-                          value === 'all' ? t('filters.allStatuses') : t(`status.${value}`)
-                        }
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">{t('filters.allStatuses')}</SelectItem>
-                      <SelectItem value="new">{t('status.new')}</SelectItem>
-                      <SelectItem value="sent">{t('status.sent')}</SelectItem>
-                      <SelectItem value="in_progress">{t('status.in_progress')}</SelectItem>
-                      <SelectItem value="done">{t('status.done')}</SelectItem>
-                      <SelectItem value="dismissed">{t('status.dismissed')}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <Select value={impactFilter} onValueChange={(v) => v && setImpactFilter(v)}>
-                    <SelectTrigger className="h-8 w-[120px] text-xs">
-                      <SelectValue>
-                        {(value) =>
-                          value === 'all' ? t('filters.allImpacts') : t(`impact.${value}`)
-                        }
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">{t('filters.allImpacts')}</SelectItem>
-                      <SelectItem value="high">{t('impact.high')}</SelectItem>
-                      <SelectItem value="medium">{t('impact.medium')}</SelectItem>
-                      <SelectItem value="low">{t('impact.low')}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <Select value={typeFilter} onValueChange={(v) => v && setTypeFilter(v)}>
-                    <SelectTrigger className="h-8 w-[110px] text-xs">
-                      <SelectValue>
-                        {(value) => (value === 'all' ? t('filters.allTypes') : t(`type.${value}`))}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">{t('filters.allTypes')}</SelectItem>
-                      <SelectItem value="owned">{t('type.owned')}</SelectItem>
-                      <SelectItem value="earned">{t('type.earned')}</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  {(topicOptions.length >= 2 || topicFilter !== '') && (
+                    <Select
+                      items={[
+                        { value: 'all', label: t('filters.allTopics') },
+                        ...topicOptions.map((o) => ({ value: o.topicId, label: o.name })),
+                      ]}
+                      value={topicFilter || 'all'}
+                      onValueChange={(v) => setTopicFilter(!v || v === 'all' ? '' : v)}
+                    >
+                      <SelectTrigger className="h-8 w-44 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      {/* Wider than the trigger, so topic names fit; the item
+                          text may shrink so a longer name truncates instead of
+                          running past the edge, and the count stays aligned. */}
+                      <SelectContent
+                        align="start"
+                        alignItemWithTrigger={false}
+                        className="w-auto min-w-(--anchor-width) max-w-80"
+                      >
+                        <SelectItem value="all">{t('filters.allTopics')}</SelectItem>
+                        {topicOptions.map((o) => (
+                          <SelectItem
+                            key={o.topicId}
+                            value={o.topicId}
+                            className="[&>div]:min-w-0 [&>div]:shrink"
+                          >
+                            <span className="min-w-0 flex-1 truncate" title={o.name}>
+                              {o.name}
+                            </span>
+                            <span className="ml-2 shrink-0 tabular-nums text-muted-foreground">
+                              {o.count}
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
                   {showPromptFilter && (
                     <Combobox
                       items={promptItems}
@@ -769,6 +919,78 @@ export default function ContentPage() {
                       </ComboboxContent>
                     </Combobox>
                   )}
+                  <Select value={typeFilter} onValueChange={(v) => v && setTypeFilter(v)}>
+                    <SelectTrigger className="h-8 w-[110px] text-xs">
+                      <SelectValue>
+                        {(value) => (value === 'all' ? t('filters.allTypes') : t(`type.${value}`))}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent
+                      align="start"
+                      alignItemWithTrigger={false}
+                      className="w-auto min-w-(--anchor-width)"
+                    >
+                      <SelectItem value="all">{t('filters.allTypes')}</SelectItem>
+                      {(['owned', 'earned'] as const).map((type) => (
+                        <SelectItem key={type} value={type}>
+                          <span className="flex flex-col">
+                            <span>{t(`type.${type}`)}</span>
+                            <span className="text-[11px] text-muted-foreground">
+                              {t(`typeHint.${type}`)}
+                            </span>
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Select value={impactFilter} onValueChange={(v) => v && setImpactFilter(v)}>
+                    <SelectTrigger className="h-8 w-[120px] text-xs">
+                      <SelectValue>
+                        {(value) =>
+                          value === 'all' ? t('filters.allImpacts') : t(`impact.${value}`)
+                        }
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">{t('filters.allImpacts')}</SelectItem>
+                      <SelectItem value="high">{t('impact.high')}</SelectItem>
+                      <SelectItem value="medium">{t('impact.medium')}</SelectItem>
+                      <SelectItem value="low">{t('impact.low')}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select value={statusFilter} onValueChange={(v) => v && setStatusFilter(v)}>
+                    <SelectTrigger className="h-8 w-[130px] text-xs">
+                      <SelectValue>
+                        {(value) =>
+                          value === 'all' ? t('filters.allStatuses') : t(`status.${value}`)
+                        }
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">{t('filters.allStatuses')}</SelectItem>
+                      <SelectItem value="new">{t('status.new')}</SelectItem>
+                      <SelectItem value="reviewed">{t('status.reviewed')}</SelectItem>
+                      <SelectItem value="sent">{t('status.sent')}</SelectItem>
+                      <SelectItem value="in_progress">{t('status.in_progress')}</SelectItem>
+                      <SelectItem value="done">{t('status.done')}</SelectItem>
+                      <SelectItem value="dismissed">{t('status.dismissed')}</SelectItem>
+                      <SelectItem value="archived">{t('status.archived')}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select value={sortOrder} onValueChange={(v) => v && setSortOrder(v)}>
+                    <SelectTrigger className="h-8 w-[130px] text-xs" aria-label={t('sort.label')}>
+                      <SelectValue>
+                        {(value) => t(`sort.${value as 'score' | 'newest'}`)}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {SORT_VALUES.map((value) => (
+                        <SelectItem key={value} value={value}>
+                          {t(`sort.${value}`)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
             </CardHeader>
@@ -920,22 +1142,46 @@ export default function ContentPage() {
                         />
                       </TableCell>
                       <TableCell className="pl-6 max-w-0">
-                        <Link
-                          href={`/dashboard/content/${opp.id}`}
-                          className="block hover:underline"
+                        <button
+                          type="button"
+                          onClick={() => selectOpportunity(opp.id)}
+                          className="block w-full text-left hover:underline"
                         >
-                          <p className="text-sm font-medium line-clamp-1">{opp.title}</p>
+                          <p className="text-sm font-medium line-clamp-1">
+                            {opp.sourceData?.reopened && opp.status === 'new' && (
+                              <Badge
+                                variant="outline"
+                                className="mr-1.5 border-amber-500/30 bg-amber-500/10 text-[10px] text-amber-700 dark:text-amber-400"
+                              >
+                                {t('newSignal')}
+                              </Badge>
+                            )}
+                            {opp.title}
+                          </p>
                           {opp.description && (
                             <p className="text-xs text-muted-foreground line-clamp-1 mt-0.5">
                               {opp.description}
                             </p>
                           )}
-                        </Link>
+                        </button>
                       </TableCell>
                       <TableCell className="text-center">
-                        <Badge variant="outline" className="text-xs">
-                          {t(`type.${opp.type}` as 'type.owned' | 'type.earned')}
-                        </Badge>
+                        <div className="flex flex-col items-center gap-1">
+                          <Badge
+                            variant="outline"
+                            className="text-xs"
+                            title={t(
+                              `typeHint.${opp.type}` as 'typeHint.owned' | 'typeHint.earned',
+                            )}
+                          >
+                            {t(`type.${opp.type}` as 'type.owned' | 'type.earned')}
+                          </Badge>
+                          {opp.decision && (
+                            <Badge variant="secondary" className="text-[10px]">
+                              {t(`decision.${opp.decision}`)}
+                            </Badge>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell className="text-center">
                         <Badge
@@ -992,12 +1238,18 @@ export default function ContentPage() {
                               </Button>
                             </>
                           )}
-                          <Link href={`/dashboard/content/${opp.id}`}>
+                          {/* The full page, in a new tab so the list stays put. */}
+                          <Link
+                            href={`/dashboard/content/${opp.id}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
                             <Button
                               variant="ghost"
                               size="sm"
                               className="h-7 px-2 text-xs"
-                              aria-label={t('viewDetails')}
+                              aria-label={t('openInNewTab')}
+                              title={t('openInNewTab')}
                             >
                               <ExternalLink className="h-3 w-3" />
                             </Button>
@@ -1031,6 +1283,27 @@ export default function ContentPage() {
           </Card>
         </>
       )}
+
+      <Sheet
+        open={openOpportunityId !== null}
+        onOpenChange={(open) => {
+          if (!open) selectOpportunity(null);
+        }}
+      >
+        <SheetContent className="flex flex-col gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-4xl">
+          <SheetTitle className="sr-only">{t('viewDetails')}</SheetTitle>
+          <div className="flex-1 overflow-y-auto p-6">
+            {openOpportunityId && (
+              <OpportunityDetail
+                key={openOpportunityId}
+                id={openOpportunityId}
+                inDrawer
+                onChanged={() => loadData(true)}
+              />
+            )}
+          </div>
+        </SheetContent>
+      </Sheet>
 
       <WebhookSettingsDialog
         open={webhookOpen}

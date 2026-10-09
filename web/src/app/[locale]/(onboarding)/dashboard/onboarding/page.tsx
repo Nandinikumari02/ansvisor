@@ -334,6 +334,24 @@ export default function OnboardingPage() {
   // Step 6 (cloud only)
   const [checkoutLoading, setCheckoutLoading] = useState<PlanId | null>(null);
   const [organizationId, setOrganizationId] = useState<string | null>(null);
+  // Trial length when the plan step is reached; null once the organization has
+  // had a subscription, since checkout then starts the plan without a trial.
+  const [trialDays, setTrialDays] = useState<number | null>(14);
+
+  useEffect(() => {
+    if (step !== 6) return;
+    let cancelled = false;
+    fetch('/api/stripe/trial')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { trialAvailable: boolean; trialDays: number } | null) => {
+        if (!cancelled && body) setTrialDays(body.trialAvailable ? body.trialDays : null);
+      })
+      // Keeps the default copy; checkout itself decides whether there is a trial.
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [step]);
   const [currentPlanId, setCurrentPlanId] = useState<PlanId>('starter');
 
   // What the dashboard preview shows when the plan step is reached by resuming
@@ -591,7 +609,7 @@ export default function OnboardingPage() {
       // Create brand if not already created
       if (!createdBrand) {
         // logo_url starts null — BrandAvatar derives the favicon at render time.
-        const brand = await createBrand({
+        const result = await createBrand({
           organizationId: orgId,
           name: brandName.trim(),
           description: description.trim() || undefined,
@@ -600,6 +618,11 @@ export default function OnboardingPage() {
           language,
           domains: domain ? [{ domain, isPrimary: true }] : [],
         });
+        if ('error' in result) {
+          toast.error(result.error);
+          return;
+        }
+        const { brand } = result;
 
         setCreatedBrand(brand);
         addBrand(brand);
@@ -801,6 +824,7 @@ export default function OnboardingPage() {
         description: description.trim(),
         website: domain,
         language,
+        region,
       });
       setSuggestedCompetitors((prev) => mergeCompetitorSuggestions(prev, competitors));
     } catch (err) {
@@ -887,7 +911,7 @@ export default function OnboardingPage() {
 
       // Cloud mode → proceed to subscription step (tracking triggered after payment)
       if (isCloud()) {
-        toast.success('Almost done! Choose a plan to start your free trial.');
+        toast.success('Almost done! Choose a plan to get started.');
         setSavingCompetitors(false);
         setStep(6);
         return;
@@ -1665,7 +1689,7 @@ export default function OnboardingPage() {
           <div className="mb-8 text-center">
             <p className="text-2xl tracking-tight">Welcome to {siteConfig.name}!</p>
             <h1 className="mt-1 text-3xl font-bold tracking-tight sm:text-4xl">
-              Start Your 14-Day Free Trial
+              {trialDays ? `Start Your ${trialDays}-Day Free Trial` : 'Choose Your Plan'}
             </h1>
           </div>
 
@@ -1755,7 +1779,11 @@ export default function OnboardingPage() {
           </div>
 
           <p className="mt-8 text-center text-lg">Secure payments powered by Stripe.</p>
-          <p className="mt-1 text-center text-sm">Cancel anytime during your 14-day free trial.</p>
+          <p className="mt-1 text-center text-sm">
+            {trialDays
+              ? `Cancel anytime during your ${trialDays}-day free trial.`
+              : 'Your free trial has been used, so your plan starts today. Cancel anytime.'}
+          </p>
         </div>
 
         <div className="flex mx-auto w-full max-w-2xl items-center justify-between mt-8">

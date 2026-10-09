@@ -4,7 +4,7 @@
  *
  *   POST /api/audits        { url, brandId }  → run a single-page audit
  *   GET  /api/audits/:id                      → fetch a stored audit + signals
- *   GET  /api/audits?brandId=…                → recent audits for a brand
+ *   GET  /api/audits?brandId=…&limit=&offset= → recent audits for a brand (paged)
  *
  * The audit runs synchronously: one Scrape.do fetch, the deterministic signal
  * engine, one batched LLM round-trip for the semantic signals, and a Wikidata
@@ -23,6 +23,8 @@ import {
   PlanLimitError,
 } from '../lib/plan-guard.js';
 import { buildAuditContext } from '../lib/audit/context.js';
+import { normStoredDomain } from '../lib/audit/host.js';
+import { buildTrendPoints, parseListPage, TREND_LIMIT } from '../lib/audit/history.js';
 import { runSignals } from '../lib/audit/engine.js';
 import { evaluateLlmSignals } from '../lib/audit/llm-signals.js';
 import { evaluateBrandEntity } from '../lib/audit/external-signals.js';
@@ -242,17 +244,10 @@ router.get('/quota', async (req, res) => {
   }
 });
 
-/** Lowercased host of a URL with a leading www. stripped (null on failure). */
-function normHost(u) {
-  try {
-    return new URL(u).host.replace(/^www\./i, '').toLowerCase();
-  } catch {
-    return null;
-  }
-}
-
 // GET /api/audits/trend?brandId=… — completed audits of the brand's PRIMARY
-// domain over time (score + category scores), for the hub trend chart.
+// domain over time (score + category scores), for the hub trend chart. Reads
+// the newest TREND_LIMIT completed audits so the chart always ends at the
+// latest one, then returns the points oldest → newest.
 // Registered before /:id so "trend" isn't matched as an audit id.
 router.get('/trend', async (req, res) => {
   const userId = req.user?.id;
@@ -270,34 +265,17 @@ router.get('/trend', async (req, res) => {
       .eq('brand_id', brandId);
     const primary =
       (domainRows ?? []).find((d) => d.is_primary)?.domain ?? (domainRows ?? [])[0]?.domain ?? null;
-    const primaryHost = primary
-      ? primary
-          .replace(/^https?:\/\//, '')
-          .replace(/^www\./i, '')
-          .toLowerCase()
-      : null;
+    const primaryHost = normStoredDomain(primary);
 
     const { data: rows } = await supabaseAdmin
       .from('site_audits')
       .select('id, url, final_url, total_score, category_scores, created_at')
       .eq('brand_id', brandId)
       .eq('status', 'completed')
-      .order('created_at', { ascending: true })
-      .limit(500);
+      .order('created_at', { ascending: false })
+      .limit(TREND_LIMIT);
 
-    // Keep only audits of the primary domain (match on host of url / final_url).
-    const points = (rows ?? [])
-      .filter((r) => {
-        if (!primaryHost) return false;
-        const h = normHost(r.final_url) ?? normHost(r.url);
-        return h === primaryHost;
-      })
-      .map((r) => ({
-        id: r.id,
-        createdAt: r.created_at,
-        totalScore: r.total_score === null ? null : Number(r.total_score),
-        categoryScores: r.category_scores ?? {},
-      }));
+    const points = buildTrendPoints(rows, primaryHost);
 
     return res.json({ success: true, primaryDomain: primary, points });
   } catch (err) {
@@ -341,10 +319,13 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// GET /api/audits?brandId=… — recent audits for a brand (list, no signals)
+// GET /api/audits?brandId=…&limit=50&offset=0 — recent audits for a brand,
+// newest first (list, no signals). `total` is the brand's full audit count so
+// the client can page; omitting limit/offset returns the newest 50 as before.
 router.get('/', async (req, res) => {
   const userId = req.user?.id;
   const { brandId } = req.query;
+  const { limit, offset } = parseListPage(req.query);
 
   if (!brandId) {
     return res.status(400).json({ success: false, message: 'brandId is required' });
@@ -353,14 +334,17 @@ router.get('/', async (req, res) => {
   try {
     await assertBrandAccess(brandId, userId);
 
-    const { data: audits } = await supabaseAdmin
+    const { data: audits, count } = await supabaseAdmin
       .from('site_audits')
-      .select('id, url, status, total_score, signals_evaluated, signals_total, created_at')
+      .select('id, url, status, total_score, signals_evaluated, signals_total, created_at', {
+        count: 'exact',
+      })
       .eq('brand_id', brandId)
       .order('created_at', { ascending: false })
-      .limit(50);
+      .order('id', { ascending: false })
+      .range(offset, offset + limit - 1);
 
-    return res.json({ success: true, audits: audits ?? [] });
+    return res.json({ success: true, audits: audits ?? [], total: count ?? 0 });
   } catch (err) {
     if (err.status) {
       return res.status(err.status).json({ success: false, message: err.message });

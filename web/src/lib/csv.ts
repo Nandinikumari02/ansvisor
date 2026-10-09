@@ -1,7 +1,13 @@
+const FORMULA_PREFIX_REGEX = /^[=+\-@\t\r]/;
+
 function escape(value: unknown): string {
   if (value === null || value === undefined) return '';
 
-  const s = String(value);
+  let s = String(value);
+  if (typeof value === 'string' && FORMULA_PREFIX_REGEX.test(s)) {
+    s = `'${s}`;
+  }
+
   if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
   return s;
 }

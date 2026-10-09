@@ -11705,3 +11705,2442 @@ alter role service_role set statement_timeout = '120s';
 -- this one up without a restart.
 notify pgrst, 'reload config';
 
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00101_prompt_clusters.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Prompt clusters: the unit content opportunities will be generated for (#857).
+--
+-- Opportunities are generated per prompt today, so one need asked eight ways
+-- yields eight near-identical suggestions and most prompts get none. A
+-- cluster is a group of prompts in the same topic that share one intent:
+-- one piece of content can answer all of them.
+--
+-- Clusters are built per scope — a topic, or a brand's prompts with no topic
+-- (topic_id null) — by the server, and rebuilt only when the scope's active
+-- prompts change. prompt_cluster_scopes records what each scope was last
+-- clustered from. A rebuild keeps a cluster's id when its membership mostly
+-- survives, so whatever is attached to a cluster later outlives a re-run.
+--
+-- prompt_cluster_queries is the cluster's fan-out basket: the sub-queries AI
+-- engines searched while answering the cluster's prompts, each judged once as
+-- relevant to the cluster and brand (included) or not (excluded).
+--
+-- The server writes all three through the service role; members read them.
+
+create table public.prompt_clusters (
+  id uuid primary key default gen_random_uuid(),
+  brand_id uuid not null references public.brands(id) on delete cascade,
+  -- Null is the scope of prompts with no topic.
+  topic_id uuid references public.topics(id) on delete cascade,
+  label text not null,
+  primary_intent text not null,
+  secondary_intents text[] not null default '{}',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index prompt_clusters_brand_topic_idx
+  on public.prompt_clusters (brand_id, topic_id);
+
+-- A prompt belongs to exactly one cluster.
+create table public.prompt_cluster_members (
+  prompt_id uuid primary key references public.prompts(id) on delete cascade,
+  cluster_id uuid not null references public.prompt_clusters(id) on delete cascade
+);
+
+create index prompt_cluster_members_cluster_idx
+  on public.prompt_cluster_members (cluster_id);
+
+create table public.prompt_cluster_scopes (
+  brand_id uuid not null references public.brands(id) on delete cascade,
+  topic_id uuid references public.topics(id) on delete cascade,
+  -- Hash of the scope's active prompts (id and text) at the last clustering.
+  fingerprint text not null,
+  clustered_at timestamptz not null default now(),
+  unique nulls not distinct (brand_id, topic_id)
+);
+
+create table public.prompt_cluster_queries (
+  cluster_id uuid not null references public.prompt_clusters(id) on delete cascade,
+  -- Normalized: trimmed, whitespace collapsed, lower-cased.
+  query text not null,
+  -- Answers in the window that searched this query, across the cluster.
+  times_searched integer not null,
+  included boolean not null,
+  reason text not null default '',
+  judged_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  primary key (cluster_id, query)
+);
+
+-- ─── Row level security ──────────────────────────────────────────────────────
+
+alter table public.prompt_clusters enable row level security;
+alter table public.prompt_cluster_members enable row level security;
+alter table public.prompt_cluster_scopes enable row level security;
+alter table public.prompt_cluster_queries enable row level security;
+
+create policy "prompt_clusters: member select"
+  on public.prompt_clusters
+  for select
+  using (
+    brand_id in (
+      select b.id
+      from public.brands b
+      join public.profiles p on p.organization_id = b.organization_id
+      where p.id = auth.uid()
+    )
+  );
+
+create policy "prompt_cluster_members: member select"
+  on public.prompt_cluster_members
+  for select
+  using (
+    cluster_id in (
+      select c.id
+      from public.prompt_clusters c
+      join public.brands b on b.id = c.brand_id
+      join public.profiles p on p.organization_id = b.organization_id
+      where p.id = auth.uid()
+    )
+  );
+
+create policy "prompt_cluster_scopes: member select"
+  on public.prompt_cluster_scopes
+  for select
+  using (
+    brand_id in (
+      select b.id
+      from public.brands b
+      join public.profiles p on p.organization_id = b.organization_id
+      where p.id = auth.uid()
+    )
+  );
+
+create policy "prompt_cluster_queries: member select"
+  on public.prompt_cluster_queries
+  for select
+  using (
+    cluster_id in (
+      select c.id
+      from public.prompt_clusters c
+      join public.brands b on b.id = c.brand_id
+      join public.profiles p on p.organization_id = b.organization_id
+      where p.id = auth.uid()
+    )
+  );
+
+-- ─── Writes ──────────────────────────────────────────────────────────────────
+
+-- Replaces one scope's clusters in a single statement, so a reader never sees
+-- a scope half-rebuilt. p_clusters is [{id, label, primary_intent,
+-- secondary_intents, prompt_ids}]; id is an existing cluster of the scope to
+-- keep, or null for a new one. The scope's other clusters are deleted.
+create or replace function public.replace_prompt_clusters(
+  p_brand_id uuid,
+  p_topic_id uuid,
+  p_fingerprint text,
+  p_clusters jsonb
+) returns void
+language plpgsql
+set search_path = public
+as $$
+declare
+  c jsonb;
+  cid uuid;
+  kept uuid[] := '{}';
+begin
+  for c in select * from jsonb_array_elements(p_clusters) loop
+    cid := nullif(c->>'id', '')::uuid;
+
+    if cid is not null then
+      update prompt_clusters
+         set label = c->>'label',
+             primary_intent = c->>'primary_intent',
+             secondary_intents = array(select jsonb_array_elements_text(c->'secondary_intents')),
+             updated_at = now()
+       where id = cid
+         and brand_id = p_brand_id
+         and topic_id is not distinct from p_topic_id;
+      if not found then
+        cid := null;
+      end if;
+    end if;
+
+    if cid is null then
+      insert into prompt_clusters (brand_id, topic_id, label, primary_intent, secondary_intents)
+      values (
+        p_brand_id,
+        p_topic_id,
+        c->>'label',
+        c->>'primary_intent',
+        array(select jsonb_array_elements_text(c->'secondary_intents'))
+      )
+      returning id into cid;
+    end if;
+
+    kept := kept || cid;
+
+    insert into prompt_cluster_members (prompt_id, cluster_id)
+    select pid::uuid, cid
+    from jsonb_array_elements_text(c->'prompt_ids') pid
+    on conflict (prompt_id) do update set cluster_id = excluded.cluster_id;
+  end loop;
+
+  -- Prompts that left the scope or went inactive, still pointing at a kept
+  -- cluster.
+  delete from prompt_cluster_members m
+   where m.cluster_id = any(kept)
+     and not exists (
+       select 1
+       from jsonb_array_elements(p_clusters) c2,
+            jsonb_array_elements_text(c2->'prompt_ids') pid
+       where pid::uuid = m.prompt_id
+     );
+
+  delete from prompt_clusters
+   where brand_id = p_brand_id
+     and topic_id is not distinct from p_topic_id
+     and id <> all(kept);
+
+  insert into prompt_cluster_scopes (brand_id, topic_id, fingerprint, clustered_at)
+  values (p_brand_id, p_topic_id, p_fingerprint, now())
+  on conflict (brand_id, topic_id) do update
+    set fingerprint = excluded.fingerprint,
+        clustered_at = excluded.clustered_at;
+end;
+$$;
+
+revoke all on function public.replace_prompt_clusters(uuid, uuid, text, jsonb) from public, anon, authenticated;
+grant execute on function public.replace_prompt_clusters(uuid, uuid, text, jsonb) to service_role;
+
+-- ─── Reads ───────────────────────────────────────────────────────────────────
+
+-- A brand's fan-out sub-queries in a window, per prompt, keeping only queries
+-- searched in at least p_min_answers answers across the brand. Counting
+-- matches report_query_fanout: once per answer however often the answer
+-- repeats it. Returned as one jsonb array of [prompt_id, query,
+-- times_searched], so PostgREST's row cap does not apply: the largest brand
+-- has about 5,700 such rows a month.
+create or replace function public.brand_prompt_fanout_queries(
+  p_brand_id uuid,
+  p_since timestamptz,
+  p_min_answers integer default 2
+)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  with items as (
+    select
+      pr.id as result_id,
+      pr.prompt_id,
+      lower(btrim(regexp_replace(it->>'query', '\s+', ' ', 'g'))) as query
+    from prompt_results pr
+    cross join lateral jsonb_array_elements(pr.search_queries) it
+    where pr.brand_id = p_brand_id
+      and pr.created_at >= p_since
+      and jsonb_typeof(pr.search_queries) = 'array'
+      and it->>'query' is not null
+  ),
+  frequent as (
+    select i.query
+    from items i
+    where i.query <> ''
+    group by i.query
+    having count(distinct i.result_id) >= p_min_answers
+  )
+  select coalesce(jsonb_agg(jsonb_build_array(r.prompt_id, r.query, r.n)), '[]'::jsonb)
+  from (
+    select i.prompt_id, i.query, count(distinct i.result_id) as n
+    from items i
+    join frequent f on f.query = i.query
+    group by i.prompt_id, i.query
+  ) r;
+$$;
+
+revoke all on function public.brand_prompt_fanout_queries(uuid, timestamptz, integer) from public, anon, authenticated;
+grant execute on function public.brand_prompt_fanout_queries(uuid, timestamptz, integer) to service_role;
+
+comment on table public.prompt_clusters is 'Groups of prompts in one topic (or the no-topic scope) that share one intent; the unit content opportunities are generated for (#857).';
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00102_cluster_opportunities.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Content opportunities per prompt cluster (#857).
+--
+-- An opportunity now belongs to a prompt cluster (00101) instead of a single
+-- prompt. cluster_id is the cluster it was generated for. related_cluster_ids
+-- holds clusters in other topics found to need the same content: they are
+-- merged into the existing opportunity instead of getting a near-copy of it.
+-- prompt_id stays, set to the cluster's highest-volume prompt, so the prompt
+-- filter, webhooks and briefs keep working until they move to clusters.
+--
+-- Rows from before this change keep cluster_id null.
+
+alter table public.content_opportunities
+  add column cluster_id uuid references public.prompt_clusters(id) on delete set null,
+  add column related_cluster_ids uuid[] not null default '{}';
+
+create index idx_co_cluster_id on public.content_opportunities (cluster_id);
+
+-- Per-prompt visibility for ranking clusters, read from the Insights rollups
+-- (00066) rather than prompt_results: on the largest brand the same figures
+-- from raw answers take about 50 s, from the rollups under one second.
+--
+-- Both rates are shares of the prompt's engine-days in the window: the
+-- brand's is the share where it was mentioned or cited, a competitor's the
+-- share where it was visible. top_competitor_visibility is the strongest
+-- live competitor's rate, and competitors lists up to five, strongest first.
+create or replace function public.brand_prompt_opportunity_metrics(
+  p_brand_id uuid,
+  p_since date
+)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  with cells as (
+    select prompt_id,
+           count(*) as cells,
+           count(*) filter (where has_mention or has_citation) as visible
+    from insights_prompt_daily
+    where brand_id = p_brand_id and day >= p_since
+    group by prompt_id
+  ),
+  comp as (
+    select d.prompt_id, c.name, count(*) as visible
+    from insights_competitor_prompt_daily d
+    join competitors c on c.id::text = d.competitor_id and c.brand_id = p_brand_id
+    where d.brand_id = p_brand_id and d.day >= p_since
+    group by d.prompt_id, c.name
+  ),
+  top as (
+    select prompt_id,
+           max(visible) as visible,
+           (array_agg(name order by visible desc, name))[1:5] as names
+    from comp
+    group by prompt_id
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'prompt_id', c.prompt_id,
+    'cells', c.cells,
+    'visibility', round(100.0 * c.visible / c.cells, 1),
+    'top_competitor_visibility', round(100.0 * coalesce(t.visible, 0) / c.cells, 1),
+    'competitors', coalesce(to_jsonb(t.names), '[]'::jsonb)
+  )), '[]'::jsonb)
+  from cells c
+  left join top t on t.prompt_id = c.prompt_id;
+$$;
+
+revoke all on function public.brand_prompt_opportunity_metrics(uuid, date) from public, anon, authenticated;
+grant execute on function public.brand_prompt_opportunity_metrics(uuid, date) to service_role;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00103_cluster_opportunity_list.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- The Content page reads opportunities through their clusters (#857).
+--
+-- 1. Archive the per-prompt backlog. Before 00102, opportunities were
+--    generated per prompt and piled up: thousands of open ones across brands,
+--    up to ~760 on one brand, almost none ever worked on. Cluster
+--    opportunities would be lost among them. Untouched ones (status 'new', no
+--    brief) move to 'archived', which the list and its summary hide unless
+--    asked for. Nothing is deleted: setting one back to 'new' restores it.
+--    Ones with a brief, or that moved past 'new', are left alone.
+--
+-- 2. content_opportunity_aggregates takes the list's new filters. A prompt
+--    matches the opportunities of its cluster, not only the ones whose
+--    prompt_id it is; a topic matches opportunities whose own or merged
+--    clusters are in it. It also counts the brand's signals: the prompts
+--    and fan-out queries its clusters were built from.
+
+update public.content_opportunities
+   set status = 'archived', updated_at = now()
+ where cluster_id is null
+   and status = 'new'
+   and brief is null;
+
+drop function if exists public.content_opportunity_aggregates(uuid, text, text, text, text, uuid);
+
+create or replace function public.content_opportunity_aggregates(
+  p_brand_id uuid,
+  p_status text default null,
+  p_impact text default null,
+  p_type text default null,
+  p_q text default null,
+  p_prompt_id uuid default null,
+  p_topic_id uuid default null
+)
+returns table (
+  avg_score numeric,
+  high_impact_count bigint,
+  sent_count bigint,
+  signal_count bigint
+)
+language sql
+stable
+security invoker
+set search_path = public
+as $$
+  select
+    coalesce(avg(co.opportunity_score), 0) as avg_score,
+    count(*) filter (
+      where co.impact = 'high'
+    ) as high_impact_count,
+    count(*) filter (
+      where co.status in ('sent', 'in_progress', 'done')
+    ) as sent_count,
+    (
+      select count(*)
+      from prompt_cluster_members m
+      join prompt_clusters pc on pc.id = m.cluster_id
+      where pc.brand_id = p_brand_id
+    ) + (
+      select count(*)
+      from prompt_cluster_queries q
+      join prompt_clusters pc on pc.id = q.cluster_id
+      where pc.brand_id = p_brand_id
+    ) as signal_count
+  from public.content_opportunities co
+  where co.brand_id = p_brand_id
+    and (
+      (p_status is null and co.status <> 'archived')
+      or co.status = p_status
+    )
+    and (p_impact is null or co.impact = p_impact)
+    and (p_type is null or co.type = p_type)
+    and (
+      p_prompt_id is null
+      or co.prompt_id = p_prompt_id
+      or exists (
+        select 1
+        from prompt_cluster_members m
+        where m.prompt_id = p_prompt_id
+          and (m.cluster_id = co.cluster_id or m.cluster_id = any(co.related_cluster_ids))
+      )
+    )
+    and (
+      p_topic_id is null
+      or exists (
+        select 1
+        from prompt_clusters pc
+        where pc.topic_id = p_topic_id
+          and (pc.id = co.cluster_id or pc.id = any(co.related_cluster_ids))
+      )
+    )
+    and (
+      p_q is null
+      or co.title ilike '%' || p_q || '%'
+      or co.description ilike '%' || p_q || '%'
+    );
+$$;
+
+grant execute on function public.content_opportunity_aggregates(
+  uuid,
+  text,
+  text,
+  text,
+  text,
+  uuid,
+  uuid
+) to authenticated;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00104_site_pages.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Site page inventory (#857, Phase 2).
+--
+-- Content opportunities can only say "update the page you have" instead of
+-- "write a new one" if they know which pages the brand's site has. This is
+-- that list: up to 500 pages per brand, chosen from the site's sitemap, the
+-- landing pages GA sees and the brand's own pages AI answers cite, with the
+-- title, meta description and first heading of each. Page bodies are not
+-- stored.
+--
+-- The server writes it nightly; a page is re-read every 30 days. Members read
+-- it.
+
+create table public.site_pages (
+  id uuid primary key default gen_random_uuid(),
+  brand_id uuid not null references public.brands(id) on delete cascade,
+  url text not null,
+  -- Where the page was found: sitemap, ga, citation.
+  sources text[] not null default '{}',
+  -- From the sitemap, when it gives one.
+  lastmod timestamptz,
+  -- The figures it was chosen by, over the last 30 days.
+  ga_sessions integer not null default 0,
+  ai_citations integer not null default 0,
+  title text,
+  description text,
+  h1 text,
+  -- HTTP status of the last read (0 when the request failed outright), and
+  -- whether it went direct or through Scrape.do.
+  fetch_status integer,
+  fetched_via text check (fetched_via in ('direct', 'scrapedo')),
+  fetched_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (brand_id, url)
+);
+
+alter table public.site_pages enable row level security;
+
+create policy "site_pages: member select"
+  on public.site_pages
+  for select
+  using (
+    brand_id in (
+      select b.id
+      from public.brands b
+      join public.profiles p on p.organization_id = b.organization_id
+      where p.id = auth.uid()
+    )
+  );
+
+-- A brand's GA landing pages by sessions in a window, most first. One jsonb
+-- value of [landing_page, sessions] pairs, so PostgREST's row cap does not
+-- apply to the per-day rows it sums.
+create or replace function public.brand_landing_page_sessions(
+  p_brand_id uuid,
+  p_since date,
+  p_limit integer default 300
+)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  select coalesce(jsonb_agg(jsonb_build_array(landing_page, sessions)), '[]'::jsonb)
+  from (
+    select landing_page, sum(sessions)::bigint as sessions
+    from ga_page_stats
+    where brand_id = p_brand_id and date >= p_since and landing_page <> ''
+    group by landing_page
+    order by sum(sessions) desc
+    limit p_limit
+  ) t;
+$$;
+
+revoke all on function public.brand_landing_page_sessions(uuid, date, integer) from public, anon, authenticated;
+grant execute on function public.brand_landing_page_sessions(uuid, date, integer) to service_role;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00105_opportunity_decision.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- What a content opportunity asks for, given the brand's existing pages
+-- (#857, Phase 2): write a new page, or work on one the site already has.
+--
+-- Decided at generation from the site page inventory (00104). The pages it
+-- refers to are kept in source_data.targetPages. Opportunities from before
+-- this keep decision null.
+
+alter table public.content_opportunities
+  add column decision text
+    check (decision in ('create', 'optimize', 'expand', 'refresh', 'consolidate', 'defend'));
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00106_opportunity_lifecycle.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- An opportunity's status follows the Action Center work sent from it (#857,
+-- Phase 4).
+--
+-- The lifecycle is New → Reviewed → Sent → In Progress → Done. Reviewed is
+-- set by a person on the opportunity. The rest follow the actions sent from
+-- it (#943), whatever changes them — the Action Center, MCP or anything
+-- later — so this is a trigger rather than code in each of those paths:
+--
+--   every action dismissed           → reviewed (the work was called off)
+--   every live action completed      → done
+--   any action started or completed  → in_progress
+--   otherwise (all still new)        → sent
+--
+-- Only an opportunity somewhere on that path is moved. One a person has
+-- dismissed or that was archived stays where it is.
+
+create or replace function public.sync_opportunity_status()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  opp uuid := nullif(new.payload->>'opportunityId', '')::uuid;
+  next_status text;
+begin
+  if opp is null then
+    return new;
+  end if;
+
+  select case
+           when count(*) filter (where a.status <> 'dismissed') = 0 then 'reviewed'
+           when count(*) filter (where a.status not in ('completed', 'dismissed')) = 0 then 'done'
+           when count(*) filter (where a.status in ('in_progress', 'on_hold', 'completed')) > 0
+             then 'in_progress'
+           else 'sent'
+         end
+    into next_status
+    from actions a
+   where a.kind = 'content_opportunity'
+     and a.brand_id = new.brand_id
+     and a.payload->>'opportunityId' = opp::text;
+
+  update content_opportunities
+     set status = next_status, updated_at = now()
+   where id = opp
+     and brand_id = new.brand_id
+     and status in ('new', 'reviewed', 'sent', 'in_progress', 'done')
+     and status <> next_status;
+
+  return new;
+end;
+$$;
+
+revoke all on function public.sync_opportunity_status() from public, anon, authenticated;
+
+create trigger actions_sync_opportunity_status
+  after insert or update of status on public.actions
+  for each row
+  when (new.kind = 'content_opportunity')
+  execute function public.sync_opportunity_status();
+
+-- Bring opportunities already sent into line.
+update public.actions set status = status where kind = 'content_opportunity';
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00107_citations_domains_fast.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Citations page: keep `citations_domains` under the 8 s statement timeout.
+--
+-- On the largest brand (~116k results and ~914k citation rows in 30 days) the
+-- domain table timed out and the Citations page failed to open. Measured on
+-- the hosted database, 30-day window:
+--
+--   * Reading the brand's results went through `idx_prompt_results_created_at`
+--     — every brand's results in the window, filtered afterwards — and then
+--     to the heap for platform and model. prompt_results rows carry the full
+--     answer text, so each row is its own page read: 8–25 s on its own.
+--   * Every citation row looked its URL up in citation_urls (914k index
+--     lookups) only to group the result by domain.
+--
+-- Two changes, same output:
+--
+--   1. A covering index on prompt_results (brand_id, created_at) that carries
+--      the columns these reads filter and group on, so the brand's results
+--      in a window come from the index alone. Reading them dropped to ~2 s
+--      cold. Other brand-and-window reads over the same columns can use it.
+--      Built on production with CREATE INDEX CONCURRENTLY before this ran;
+--      `if not exists` makes it a no-op there.
+--   2. `citations_domains` groups citations by URL first and looks up each
+--      distinct URL's domain once (124k lookups instead of 914k).
+--
+-- Verified row-identical against the previous body on a brand with ~40k
+-- citations in 30 days: same 3,612 domains, citation counts, result counts
+-- and model lists. Signature, security definer, membership guard, settings
+-- and grants are unchanged.
+
+create index if not exists idx_prompt_results_brand_created_cover
+  on public.prompt_results (brand_id, created_at desc)
+  include (id, platform, model_used, region, prompt_id);
+
+create or replace function public.citations_domains(
+  p_brand_id uuid,
+  p_date_from timestamptz default null,
+  p_date_to timestamptz default null,
+  p_models text[] default null,
+  p_regions text[] default null,
+  p_prompt_ids uuid[] default null,
+  p_topic_ids uuid[] default null
+)
+returns table (domain text, total_citations bigint, results_citing bigint, models text[])
+language plpgsql
+stable
+security definer
+set search_path = public
+set work_mem = '96MB'
+set plan_cache_mode = force_custom_plan
+as $$
+#variable_conflict use_column
+begin
+  return query
+  with allowed as (
+    select 1 from brands b
+    join profiles pf on pf.organization_id = b.organization_id
+    where b.id = p_brand_id and pf.id = auth.uid()
+  ),
+  -- The brand's results in scope, read from the covering index.
+  res as materialized (
+    select pr.id, coalesce(pr.model_used, pr.platform) as m
+    from public.prompt_results pr
+    where exists (select 1 from allowed)
+      and pr.brand_id = p_brand_id
+      and pr.platform <> 'chatgpt-shopping'
+      and (p_date_from  is null or pr.created_at >= p_date_from)
+      and (p_date_to    is null or pr.created_at <= p_date_to)
+      and (p_models     is null or pr.model_used = any(p_models))
+      and (p_regions    is null or pr.region = any(p_regions))
+      and (p_prompt_ids is null or pr.prompt_id = any(p_prompt_ids))
+      and (p_topic_ids  is null or pr.prompt_id in (
+            select pp.id from public.prompts pp where pp.topic_id = any(p_topic_ids)))
+  ),
+  -- Citations per (URL, result), before any URL is resolved to its domain.
+  cites as materialized (
+    select c.url_id, c.prompt_result_id as rid, count(*) as n
+    from public.prompt_result_citations c
+    where exists (select 1 from allowed)
+      and c.brand_id = p_brand_id
+      and (p_date_from is null or c.created_at >= p_date_from)
+      and (p_date_to   is null or c.created_at <= p_date_to)
+    group by c.url_id, c.prompt_result_id
+  ),
+  -- Each distinct URL's domain, looked up once.
+  url_domains as materialized (
+    select cu.id, cu.domain
+    from public.citation_urls cu
+    where cu.id in (select url_id from cites)
+  ),
+  pairs as (
+    select ud.domain as d, ci.rid, sum(ci.n)::bigint as n, min(r.m) as m
+    from cites ci
+    join res r on r.id = ci.rid
+    join url_domains ud on ud.id = ci.url_id
+    group by ud.domain, ci.rid
+  ),
+  counts as (
+    select d, sum(n)::bigint as tc, count(*)::bigint as rc from pairs group by d
+  ),
+  model_lists as (
+    select d, array_agg(m order by m) as ms
+    from (select distinct d, m from pairs) s
+    group by d
+  )
+  select c.d, c.tc, c.rc, m.ms
+  from counts c join model_lists m on m.d = c.d
+  order by c.tc desc;
+end;
+$$;
+
+revoke all on function public.citations_domains(
+  uuid, timestamptz, timestamptz, text[], text[], uuid[], uuid[]
+) from public;
+grant execute on function public.citations_domains(
+  uuid, timestamptz, timestamptz, text[], text[], uuid[], uuid[]
+) to authenticated, service_role;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00108_health_probe.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Daily health report: time the dashboard's heaviest reads.
+--
+-- The Citations page once stopped opening on the largest brand: one read had
+-- drifted past the 8 s statement timeout, and only a user noticed. The daily
+-- health report (server/src/lib/health) times those reads every morning and
+-- flags any that are getting close.
+--
+-- Most of them check membership through auth.uid(), so a service-role call
+-- would return nothing in no time. health_probe runs one read the way the
+-- page does — as the `authenticated` role, with a given organization
+-- member's claims, both for this transaction only — and returns how long it
+-- took. The role matters as much as the claims: run with row security
+-- bypassed, the Competitors read planned differently and ran past 120 s,
+-- against 6.9 s as the page runs it. Only the server's service role may call
+-- it, and only for the reads named below.
+
+create or replace function public.health_probe(
+  p_user_id uuid,
+  p_brand_id uuid,
+  p_probe text,
+  p_days integer default null
+)
+returns numeric
+language plpgsql
+volatile
+security invoker
+set search_path = public
+as $$
+declare
+  t0 timestamptz;
+  ts_from timestamptz := case when p_days is null then null else now() - make_interval(days => p_days) end;
+  day_from date := (now() at time zone 'utc')::date - coalesce(p_days, 0);
+  n bigint;
+begin
+  perform set_config('role', 'authenticated', true);
+  perform set_config(
+    'request.jwt.claims',
+    json_build_object('sub', p_user_id, 'role', 'authenticated')::text,
+    true
+  );
+  t0 := clock_timestamp();
+
+  case p_probe
+    when 'citations_window_stats' then
+      select count(*) into n from public.citations_window_stats(
+        p_brand_id => p_brand_id, p_date_from => ts_from, p_date_to => null,
+        p_models => null, p_regions => null, p_prompt_ids => null, p_topic_ids => null);
+    when 'citations_domains' then
+      select count(*) into n from public.citations_domains(
+        p_brand_id => p_brand_id, p_date_from => ts_from, p_date_to => null,
+        p_models => null, p_regions => null, p_prompt_ids => null, p_topic_ids => null);
+    when 'citations_urls' then
+      select count(*) into n from public.citations_urls(
+        p_brand_id => p_brand_id, p_date_from => ts_from, p_date_to => null,
+        p_models => null, p_regions => null, p_prompt_ids => null, p_topic_ids => null,
+        p_limit => 100, p_domains => null, p_exclude_domains => null);
+    when 'insights_aggregates_daily' then
+      select count(*) into n from public.insights_aggregates_daily(
+        p_brand_id => p_brand_id, p_platform => null, p_models => null, p_region => null,
+        p_day_from => case when p_days is null then null else day_from end, p_day_to => null);
+    when 'competitor_aggregates_daily' then
+      select count(*) into n from public.competitor_aggregates_daily(
+        p_brand_id => p_brand_id, p_platform => null, p_models => null, p_region => null,
+        p_day_from => case when p_days is null then null else day_from end, p_day_to => null);
+    when 'topics_overview_aggregates' then
+      select count(*) into n from public.topics_overview_aggregates(p_brand_id => p_brand_id);
+    else
+      raise exception 'unknown health probe: %', p_probe;
+  end case;
+
+  return round(extract(epoch from clock_timestamp() - t0)::numeric, 2);
+end;
+$$;
+
+revoke all on function public.health_probe(uuid, uuid, text, integer) from public, anon, authenticated;
+grant execute on function public.health_probe(uuid, uuid, text, integer) to service_role;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00109_citations_urls_fast.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Citations page: the same fix as 00107, for the URL table.
+--
+-- `citations_urls` joined each citation to its result row and filtered the
+-- results by date on both sides, so the planner read the brand's results
+-- through the created_at index and the heap. The daily health report timed
+-- it at 9.6 s on the largest brand's 30-day window, past the page's 8 s
+-- statement timeout.
+--
+-- The brand's results in scope now come from the covering index 00107 added
+-- (idx_prompt_results_brand_created_cover), and citations are grouped by
+-- (URL, result) before the join. 30-day window on the largest brand: 1.9 s.
+-- Verified row-identical against the previous body on a brand with ~13k
+-- cited URLs in 30 days (URL, citation count, result count, models).
+-- Signature, security definer, membership guard, settings and grants are
+-- unchanged.
+
+create or replace function public.citations_urls(
+  p_brand_id uuid,
+  p_date_from timestamptz default null,
+  p_date_to timestamptz default null,
+  p_models text[] default null,
+  p_regions text[] default null,
+  p_prompt_ids uuid[] default null,
+  p_topic_ids uuid[] default null,
+  p_limit integer default 2000,
+  p_domains text[] default null,
+  p_exclude_domains text[] default null
+)
+returns table (
+  url text, domain text, title text,
+  total_citations bigint, results_citing bigint, models text[], total_urls bigint
+)
+language plpgsql
+stable
+security definer
+set search_path = public
+set work_mem = '96MB'
+set plan_cache_mode = force_custom_plan
+as $$
+#variable_conflict use_column
+begin
+  return query
+  with allowed as (
+    select 1 from brands b
+    join profiles pf on pf.organization_id = b.organization_id
+    where b.id = p_brand_id and pf.id = auth.uid()
+  ),
+  -- The brand's results in scope, read from the covering index.
+  res as materialized (
+    select pr.id, coalesce(pr.model_used, pr.platform) as m
+    from public.prompt_results pr
+    where exists (select 1 from allowed)
+      and pr.brand_id = p_brand_id
+      and pr.platform <> 'chatgpt-shopping'
+      and (p_date_from  is null or pr.created_at >= p_date_from)
+      and (p_date_to    is null or pr.created_at <= p_date_to)
+      and (p_models     is null or pr.model_used = any(p_models))
+      and (p_regions    is null or pr.region = any(p_regions))
+      and (p_prompt_ids is null or pr.prompt_id = any(p_prompt_ids))
+      and (p_topic_ids  is null or pr.prompt_id in (
+            select pp.id from public.prompts pp where pp.topic_id = any(p_topic_ids)))
+  ),
+  -- Citations per (URL, result), before the join to the results.
+  cites as materialized (
+    select c.url_id as uid, c.prompt_result_id as rid, count(*) as n
+    from public.prompt_result_citations c
+    where exists (select 1 from allowed)
+      and c.brand_id = p_brand_id
+      and (p_date_from is null or c.created_at >= p_date_from)
+      and (p_date_to   is null or c.created_at <= p_date_to)
+    group by c.url_id, c.prompt_result_id
+  ),
+  agg as (
+    select ci.uid, sum(ci.n)::bigint as tc, count(*)::bigint as rc, array_agg(distinct r.m) as ms
+    from cites ci
+    join res r on r.id = ci.rid
+    group by ci.uid
+  ),
+  include_ids as (
+    select cu.id from public.citation_urls cu
+    where p_domains is not null and cu.domain = any(p_domains)
+  ),
+  exclude_ids as (
+    select cu.id from public.citation_urls cu
+    where p_exclude_domains is not null and cu.domain = any(p_exclude_domains)
+  ),
+  scoped as (
+    select a.*
+    from agg a
+    where (p_domains is null
+           or exists (select 1 from include_ids i where i.id = a.uid))
+      and (p_exclude_domains is null
+           or not exists (select 1 from exclude_ids e where e.id = a.uid))
+  )
+  select cu.url, cu.domain, cu.title, a.tc, a.rc, a.ms,
+         (select count(*)::bigint from scoped)
+  from (select * from scoped order by tc desc, uid limit p_limit) a
+  join public.citation_urls cu on cu.id = a.uid
+  order by a.tc desc;
+end;
+$$;
+
+revoke all on function public.citations_urls(
+  uuid, timestamptz, timestamptz, text[], text[], uuid[], uuid[], integer, text[], text[]
+) from public;
+grant execute on function public.citations_urls(
+  uuid, timestamptz, timestamptz, text[], text[], uuid[], uuid[], integer, text[], text[]
+) to authenticated, service_role;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00110_competitor_aggregates_work_mem.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Competitors page: let competitor_aggregates_daily sort in memory.
+--
+-- The function counts distinct prompts per competitor and per engine over
+-- the competitor-prompt rollup — ~240k rows on the largest brand's 30-day
+-- window — and with the default 5 MB work_mem each of those sorts spilled
+-- to disk (~20 MB). 64 MB keeps them in memory: 5.35 s -> 4.4 s on that
+-- window, as the page runs it. The citation reads already set 96 MB.
+--
+-- If this function is ever recreated (CREATE OR REPLACE resets its
+-- settings), keep `set work_mem = '64MB'` on the new definition.
+
+alter function public.competitor_aggregates_daily(uuid, text, text[], text, date, date)
+  set work_mem = '64MB';
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00111_citations_open_ended_date_to.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Citations page: ignore an end bound that excludes nothing.
+--
+-- The Citations server action sends every preset window with p_date_to set to
+-- the end of today. That bound excludes nothing, since no result is newer than
+-- now. But with both bounds on created_at, the planner estimates about one row
+-- for a recent window: the column statistics end before the newest days. It
+-- then joins the materialized results to the citations with a nested loop.
+--
+-- On the largest brand's default 24-hour view this turned a 0.2 s
+-- citations_domains into one past 30 s, and the page failed to open. Without
+-- the bound the same call runs in 0.2 s. The Competitor Gaps reads failed the
+-- same way.
+--
+-- Each of these functions now treats an end bound at or after now() as no end
+-- bound. A custom range that ends in the past is unchanged. Bodies are
+-- otherwise as in 00077 (gap functions), 00107 and 00109. CREATE OR REPLACE
+-- keeps the signatures, settings and grants.
+
+create or replace function public.citations_domains(
+  p_brand_id uuid,
+  p_date_from timestamptz default null,
+  p_date_to timestamptz default null,
+  p_models text[] default null,
+  p_regions text[] default null,
+  p_prompt_ids uuid[] default null,
+  p_topic_ids uuid[] default null
+)
+returns table (domain text, total_citations bigint, results_citing bigint, models text[])
+language plpgsql
+stable
+security definer
+set search_path = public
+set work_mem = '96MB'
+set plan_cache_mode = force_custom_plan
+as $$
+#variable_conflict use_column
+begin
+  -- An end bound at or after now() excludes nothing, but it makes the
+  -- planner estimate ~1 row for recent windows (see the header).
+  if p_date_to >= now() then
+    p_date_to := null;
+  end if;
+
+  return query
+  with allowed as (
+    select 1 from brands b
+    join profiles pf on pf.organization_id = b.organization_id
+    where b.id = p_brand_id and pf.id = auth.uid()
+  ),
+  -- The brand's results in scope, read from the covering index.
+  res as materialized (
+    select pr.id, coalesce(pr.model_used, pr.platform) as m
+    from public.prompt_results pr
+    where exists (select 1 from allowed)
+      and pr.brand_id = p_brand_id
+      and pr.platform <> 'chatgpt-shopping'
+      and (p_date_from  is null or pr.created_at >= p_date_from)
+      and (p_date_to    is null or pr.created_at <= p_date_to)
+      and (p_models     is null or pr.model_used = any(p_models))
+      and (p_regions    is null or pr.region = any(p_regions))
+      and (p_prompt_ids is null or pr.prompt_id = any(p_prompt_ids))
+      and (p_topic_ids  is null or pr.prompt_id in (
+            select pp.id from public.prompts pp where pp.topic_id = any(p_topic_ids)))
+  ),
+  -- Citations per (URL, result), before any URL is resolved to its domain.
+  cites as materialized (
+    select c.url_id, c.prompt_result_id as rid, count(*) as n
+    from public.prompt_result_citations c
+    where exists (select 1 from allowed)
+      and c.brand_id = p_brand_id
+      and (p_date_from is null or c.created_at >= p_date_from)
+      and (p_date_to   is null or c.created_at <= p_date_to)
+    group by c.url_id, c.prompt_result_id
+  ),
+  -- Each distinct URL's domain, looked up once.
+  url_domains as materialized (
+    select cu.id, cu.domain
+    from public.citation_urls cu
+    where cu.id in (select url_id from cites)
+  ),
+  pairs as (
+    select ud.domain as d, ci.rid, sum(ci.n)::bigint as n, min(r.m) as m
+    from cites ci
+    join res r on r.id = ci.rid
+    join url_domains ud on ud.id = ci.url_id
+    group by ud.domain, ci.rid
+  ),
+  counts as (
+    select d, sum(n)::bigint as tc, count(*)::bigint as rc from pairs group by d
+  ),
+  model_lists as (
+    select d, array_agg(m order by m) as ms
+    from (select distinct d, m from pairs) s
+    group by d
+  )
+  select c.d, c.tc, c.rc, m.ms
+  from counts c join model_lists m on m.d = c.d
+  order by c.tc desc;
+end;
+$$;
+
+create or replace function public.citations_urls(
+  p_brand_id uuid,
+  p_date_from timestamptz default null,
+  p_date_to timestamptz default null,
+  p_models text[] default null,
+  p_regions text[] default null,
+  p_prompt_ids uuid[] default null,
+  p_topic_ids uuid[] default null,
+  p_limit integer default 2000,
+  p_domains text[] default null,
+  p_exclude_domains text[] default null
+)
+returns table (
+  url text, domain text, title text,
+  total_citations bigint, results_citing bigint, models text[], total_urls bigint
+)
+language plpgsql
+stable
+security definer
+set search_path = public
+set work_mem = '96MB'
+set plan_cache_mode = force_custom_plan
+as $$
+#variable_conflict use_column
+begin
+  -- An end bound at or after now() excludes nothing, but it makes the
+  -- planner estimate ~1 row for recent windows (see the header).
+  if p_date_to >= now() then
+    p_date_to := null;
+  end if;
+
+  return query
+  with allowed as (
+    select 1 from brands b
+    join profiles pf on pf.organization_id = b.organization_id
+    where b.id = p_brand_id and pf.id = auth.uid()
+  ),
+  -- The brand's results in scope, read from the covering index.
+  res as materialized (
+    select pr.id, coalesce(pr.model_used, pr.platform) as m
+    from public.prompt_results pr
+    where exists (select 1 from allowed)
+      and pr.brand_id = p_brand_id
+      and pr.platform <> 'chatgpt-shopping'
+      and (p_date_from  is null or pr.created_at >= p_date_from)
+      and (p_date_to    is null or pr.created_at <= p_date_to)
+      and (p_models     is null or pr.model_used = any(p_models))
+      and (p_regions    is null or pr.region = any(p_regions))
+      and (p_prompt_ids is null or pr.prompt_id = any(p_prompt_ids))
+      and (p_topic_ids  is null or pr.prompt_id in (
+            select pp.id from public.prompts pp where pp.topic_id = any(p_topic_ids)))
+  ),
+  -- Citations per (URL, result), before the join to the results.
+  cites as materialized (
+    select c.url_id as uid, c.prompt_result_id as rid, count(*) as n
+    from public.prompt_result_citations c
+    where exists (select 1 from allowed)
+      and c.brand_id = p_brand_id
+      and (p_date_from is null or c.created_at >= p_date_from)
+      and (p_date_to   is null or c.created_at <= p_date_to)
+    group by c.url_id, c.prompt_result_id
+  ),
+  agg as (
+    select ci.uid, sum(ci.n)::bigint as tc, count(*)::bigint as rc, array_agg(distinct r.m) as ms
+    from cites ci
+    join res r on r.id = ci.rid
+    group by ci.uid
+  ),
+  include_ids as (
+    select cu.id from public.citation_urls cu
+    where p_domains is not null and cu.domain = any(p_domains)
+  ),
+  exclude_ids as (
+    select cu.id from public.citation_urls cu
+    where p_exclude_domains is not null and cu.domain = any(p_exclude_domains)
+  ),
+  scoped as (
+    select a.*
+    from agg a
+    where (p_domains is null
+           or exists (select 1 from include_ids i where i.id = a.uid))
+      and (p_exclude_domains is null
+           or not exists (select 1 from exclude_ids e where e.id = a.uid))
+  )
+  select cu.url, cu.domain, cu.title, a.tc, a.rc, a.ms,
+         (select count(*)::bigint from scoped)
+  from (select * from scoped order by tc desc, uid limit p_limit) a
+  join public.citation_urls cu on cu.id = a.uid
+  order by a.tc desc;
+end;
+$$;
+
+create or replace function public.citation_gap_domains(
+  p_brand_id uuid,
+  p_brand_domains text[],
+  p_competitor_domains text[],
+  p_date_from timestamptz default null,
+  p_date_to timestamptz default null,
+  p_models text[] default null,
+  p_regions text[] default null,
+  p_prompt_ids uuid[] default null,
+  p_topic_ids uuid[] default null
+)
+returns table (
+  domain text,
+  competitor_answers bigint,
+  appears_in_ours boolean,
+  strength double precision,
+  competitor_names text[],
+  our_answer_count bigint,
+  total_answers bigint
+)
+language plpgsql
+stable
+security definer
+set search_path to 'public'
+set work_mem to '96MB'
+set plan_cache_mode to 'force_custom_plan'
+as $$
+#variable_conflict use_column
+begin
+  -- An end bound at or after now() excludes nothing, but it makes the
+  -- planner estimate ~1 row for recent windows (see the header).
+  if p_date_to >= now() then
+    p_date_to := null;
+  end if;
+
+  return query
+  with allowed as (
+    select 1 from brands b
+    join profiles pf on pf.organization_id = b.organization_id
+    where b.id = p_brand_id and pf.id = auth.uid()
+  ),
+  answers as materialized (
+    select pr.id as rid,
+           coalesce(pr.mention_count, 0) > 0 as we_mention,
+           coalesce(
+             jsonb_path_exists(pr.competitor_mentions, '$[*] ? (@.mention_count > 0)'),
+             false
+           ) as comp_present,
+           pr.competitor_mentions
+    from prompt_results pr
+    where exists (select 1 from allowed)
+      and pr.brand_id = p_brand_id
+      and pr.platform <> 'chatgpt-shopping'
+      and (p_date_from  is null or pr.created_at >= p_date_from)
+      and (p_date_to    is null or pr.created_at <= p_date_to)
+      and (p_models     is null or pr.model_used = any(p_models))
+      and (p_regions    is null or pr.region = any(p_regions))
+      and (p_prompt_ids is null or pr.prompt_id = any(p_prompt_ids))
+      and (p_topic_ids  is null or pr.prompt_id in (
+            select pp.id from public.prompts pp where pp.topic_id = any(p_topic_ids)))
+  ),
+  adomains as materialized (
+    select distinct c.prompt_result_id as rid, cu.domain as d
+    from prompt_result_citations c
+    join citation_urls cu on cu.id = c.url_id
+    where c.brand_id = p_brand_id
+      and c.prompt_result_id in (select rid from answers)
+  ),
+  dtags as materialized (
+    select s.d,
+      exists (select 1 from unnest(p_brand_domains) e
+              where s.d = e or right(s.d, length(e) + 1) = '.' || e) as is_you,
+      exists (select 1 from unnest(p_competitor_domains) e
+              where s.d = e or right(s.d, length(e) + 1) = '.' || e) as is_comp
+    from (select distinct ad.d from adomains ad) s
+  ),
+  per_answer as (
+    select ad.rid, 1.0 / count(*) as w, bool_or(t.is_you) as you_cited
+    from adomains ad join dtags t on t.d = ad.d
+    group by ad.rid
+  ),
+  flags as materialized (
+    select a.rid,
+           a.we_mention or coalesce(pa.you_cited, false) as we_present,
+           a.comp_present,
+           coalesce(pa.w, 0) as w
+    from answers a
+    left join per_answer pa on pa.rid = a.rid
+  ),
+  domain_rows as (
+    select ad.d,
+      count(*) filter (where f.comp_present and not f.we_present) as competitor_answers,
+      bool_or(f.we_present) as appears,
+      coalesce(sum(f.w) filter (where f.comp_present and not f.we_present), 0) as strength
+    from adomains ad
+    join dtags t on t.d = ad.d and not t.is_you and not t.is_comp
+    join flags f on f.rid = ad.rid
+    group by ad.d
+  ),
+  qualifying as (
+    select f.rid from flags f where f.comp_present and not f.we_present
+  ),
+  mention_names as (
+    select q.rid,
+      case when co.id is not null
+           then coalesce(nullif(trim(co.name), ''), 'Competitor')
+           else coalesce(nullif(trim(x.e ->> 'name'), ''), 'Competitor')
+      end as cname
+    from qualifying q
+    join answers a on a.rid = q.rid,
+    lateral jsonb_array_elements(a.competitor_mentions) x(e)
+    left join competitors co
+      on co.brand_id = p_brand_id and co.id::text = x.e ->> 'competitor_id'
+    where coalesce((x.e ->> 'mention_count')::numeric, 0) > 0
+  ),
+  domain_names as (
+    select ad.d, array_agg(distinct mn.cname order by mn.cname) as names
+    from adomains ad
+    join dtags t on t.d = ad.d and not t.is_you and not t.is_comp
+    join mention_names mn on mn.rid = ad.rid
+    group by ad.d
+  ),
+  totals as (
+    select count(*)::bigint as total_answers,
+           (count(*) filter (where f.we_present))::bigint as our_answer_count
+    from flags f
+  )
+  select dr.d, dr.competitor_answers::bigint, dr.appears, dr.strength::float8,
+         coalesce(dn.names, '{}'::text[]), t.our_answer_count, t.total_answers
+  from domain_rows dr
+  left join domain_names dn on dn.d = dr.d
+  cross join totals t
+  where dr.competitor_answers > 0 or dr.appears
+  union all
+  select null, 0, false, 0, '{}'::text[], t.our_answer_count, t.total_answers
+  from totals t;
+end;
+$$;
+
+create or replace function public.citation_competitor_sources(
+  p_brand_id uuid,
+  p_brand_domains text[],
+  p_competitor_domains text[],
+  p_date_from timestamptz default null,
+  p_date_to timestamptz default null,
+  p_models text[] default null,
+  p_regions text[] default null,
+  p_prompt_ids uuid[] default null,
+  p_topic_ids uuid[] default null
+)
+returns table (
+  competitor_id text,
+  domain text,
+  answers_feeding bigint,
+  strength double precision
+)
+language plpgsql
+stable
+security definer
+set search_path to 'public'
+set work_mem to '96MB'
+set plan_cache_mode to 'force_custom_plan'
+as $$
+#variable_conflict use_column
+begin
+  -- An end bound at or after now() excludes nothing, but it makes the
+  -- planner estimate ~1 row for recent windows (see the header).
+  if p_date_to >= now() then
+    p_date_to := null;
+  end if;
+
+  return query
+  with allowed as (
+    select 1 from brands b
+    join profiles pf on pf.organization_id = b.organization_id
+    where b.id = p_brand_id and pf.id = auth.uid()
+  ),
+  answers as materialized (
+    select pr.id as rid, pr.competitor_mentions
+    from prompt_results pr
+    where exists (select 1 from allowed)
+      and pr.brand_id = p_brand_id
+      and pr.platform <> 'chatgpt-shopping'
+      and (p_date_from  is null or pr.created_at >= p_date_from)
+      and (p_date_to    is null or pr.created_at <= p_date_to)
+      and (p_models     is null or pr.model_used = any(p_models))
+      and (p_regions    is null or pr.region = any(p_regions))
+      and (p_prompt_ids is null or pr.prompt_id = any(p_prompt_ids))
+      and (p_topic_ids  is null or pr.prompt_id in (
+            select pp.id from public.prompts pp where pp.topic_id = any(p_topic_ids)))
+  ),
+  adomains as materialized (
+    select distinct c.prompt_result_id as rid, cu.domain as d
+    from prompt_result_citations c
+    join citation_urls cu on cu.id = c.url_id
+    where c.brand_id = p_brand_id
+      and c.prompt_result_id in (select rid from answers)
+  ),
+  dtags as materialized (
+    select s.d,
+      exists (select 1 from unnest(p_brand_domains) e
+              where s.d = e or right(s.d, length(e) + 1) = '.' || e) as is_you,
+      exists (select 1 from unnest(p_competitor_domains) e
+              where s.d = e or right(s.d, length(e) + 1) = '.' || e) as is_comp
+    from (select distinct ad.d from adomains ad) s
+  ),
+  per_answer as (
+    select ad.rid, 1.0 / count(*) as w
+    from adomains ad group by ad.rid
+  ),
+  mentions as materialized (
+    select a.rid, x.e ->> 'competitor_id' as competitor_id
+    from answers a,
+    lateral jsonb_array_elements(a.competitor_mentions) x(e)
+    where coalesce(
+            jsonb_path_exists(a.competitor_mentions, '$[*] ? (@.mention_count > 0)'),
+            false
+          )
+      and coalesce((x.e ->> 'mention_count')::numeric, 0) > 0
+  )
+  select m.competitor_id, ad.d,
+         count(distinct m.rid)::bigint as answers_feeding,
+         sum(pa.w)::float8 as strength
+  from mentions m
+  join adomains ad on ad.rid = m.rid
+  join dtags t on t.d = ad.d and not t.is_you and not t.is_comp
+  join per_answer pa on pa.rid = m.rid
+  group by m.competitor_id, ad.d;
+end;
+$$;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00112_visibility_trend_materialize.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Insights: compute the visibility trend's per-day inputs once.
+--
+-- visibility_rate_trend_daily builds each day's competitor list with a
+-- correlated subselect over comp_daily and comp_visible. Those CTEs are
+-- referenced once, so PostgreSQL inlined them into the subselect and
+-- re-aggregated the competitor rollups for every day of the window: 6.3 s
+-- for the largest brand's 30-day view (60 days with the previous period),
+-- near the 8 s statement timeout. Marking them (and prompt_daily)
+-- MATERIALIZED computes each once: 1.7 s, with byte-identical output.
+-- work_mem is raised for their distinct counts, as for
+-- competitor_aggregates_daily (00110).
+--
+-- If this function is recreated (CREATE OR REPLACE resets its settings and
+-- body), keep the MATERIALIZED CTEs and `set work_mem`.
+
+create or replace function public.visibility_rate_trend_daily(
+  p_brand_id uuid,
+  p_platform text default null,
+  p_models text[] default null,
+  p_region text default null,
+  p_day_from date default null,
+  p_day_to date default null
+) returns jsonb
+language sql
+stable
+set search_path to 'public'
+set work_mem to '64MB'
+as $$
+  with brand_daily as (
+    select d.day,
+           sum(d.answer_count)     as answers,
+           sum(d.mention_answers)  as mention_answers,
+           sum(d.citation_answers) as citation_answers,
+           sum(d.sum_inv_position) / nullif(sum(d.position_count), 0) as position_factor,
+           sum(d.position_count)   as position_n
+    from public.insights_brand_daily d
+    where d.brand_id = p_brand_id
+      and (p_platform is null or d.platform = p_platform)
+      and (p_models is null or d.model_used = any (p_models))
+      and (p_region is null or d.region = p_region)
+      and (p_day_from is null or d.day >= p_day_from)
+      and (p_day_to is null or d.day <= p_day_to)
+    group by d.day
+  ),
+  prompt_daily as materialized (
+    select d.day,
+           count(distinct d.prompt_id) as prompt_count,
+           count(distinct d.prompt_id)
+             filter (where d.has_mention or d.has_citation) as visible_prompts
+    from public.insights_prompt_daily d
+    where d.brand_id = p_brand_id
+      and (p_platform is null or d.platform = p_platform)
+      and (p_models is null or d.model_used = any (p_models))
+      and (p_region is null or d.region = p_region)
+      and (p_day_from is null or d.day >= p_day_from)
+      and (p_day_to is null or d.day <= p_day_to)
+    group by d.day
+  ),
+  comp_daily as materialized (
+    select cd.day, cd.competitor_id,
+           sum(cd.mention_answers)  as mention_answers,
+           sum(cd.citation_answers) as citation_answers,
+           sum(cd.sum_inv_position) / nullif(sum(cd.position_count), 0) as position_factor,
+           sum(cd.position_count)   as position_n
+    from public.insights_competitor_daily cd
+    join public.competitors c
+      on c.id::text = cd.competitor_id and c.brand_id = p_brand_id
+    where cd.brand_id = p_brand_id
+      and (p_platform is null or cd.platform = p_platform)
+      and (p_models is null or cd.model_used = any (p_models))
+      and (p_region is null or cd.region = p_region)
+      and (p_day_from is null or cd.day >= p_day_from)
+      and (p_day_to is null or cd.day <= p_day_to)
+    group by cd.day, cd.competitor_id
+  ),
+  comp_visible as materialized (
+    select cpd.day, cpd.competitor_id,
+           count(distinct cpd.prompt_id) as visible_prompts
+    from public.insights_competitor_prompt_daily cpd
+    join public.competitors c
+      on c.id::text = cpd.competitor_id and c.brand_id = p_brand_id
+    where cpd.brand_id = p_brand_id
+      and (p_platform is null or cpd.platform = p_platform)
+      and (p_models is null or cpd.model_used = any (p_models))
+      and (p_region is null or cpd.region = p_region)
+      and (p_day_from is null or cpd.day >= p_day_from)
+      and (p_day_to is null or cpd.day <= p_day_to)
+    group by cpd.day, cpd.competitor_id
+  )
+  select coalesce(
+    jsonb_agg(jsonb_build_object(
+      'day',              bd.day,
+      'prompt_count',     coalesce(pd.prompt_count, 0),
+      'visible_prompts',  coalesce(pd.visible_prompts, 0),
+      'answers',          bd.answers,
+      'mention_answers',  bd.mention_answers,
+      'citation_answers', bd.citation_answers,
+      'position_factor',  bd.position_factor,
+      'position_n',       bd.position_n,
+      'competitors', coalesce(
+        (select jsonb_agg(jsonb_build_object(
+                  'competitor_id',    cd.competitor_id,
+                  'visible_prompts',  coalesce(cv.visible_prompts, 0),
+                  'mention_answers',  cd.mention_answers,
+                  'citation_answers', cd.citation_answers,
+                  'position_factor',  cd.position_factor,
+                  'position_n',       cd.position_n)
+                order by cd.competitor_id)
+         from comp_daily cd
+         left join comp_visible cv
+           on cv.day = cd.day and cv.competitor_id = cd.competitor_id
+         where cd.day = bd.day),
+        '[]'::jsonb)
+    ) order by bd.day),
+    '[]'::jsonb)
+  from brand_daily bd
+  left join prompt_daily pd on pd.day = bd.day;
+$$;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00113_competitor_aggregates_custom_plan.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Competitors / Insights: plan competitor_aggregates_daily with its arguments.
+--
+-- As a `language sql` function its body was planned with the arguments as
+-- opaque parameters, so the planner never saw the brand or the window: it
+-- estimated ~2.5k competitor-prompt rows where the largest brand's 30-day
+-- window has ~240k, and picked plans for the small case. Measured as the page
+-- runs it: 4.4 s, against 0.66 s for the same query with the values inlined.
+--
+-- Same cure as the citation reads (00070, 00077): plpgsql, which plans through
+-- the SPI cache with the argument values in hand, and plan_cache_mode =
+-- force_custom_plan so it never settles on a generic plan. The body is the
+-- 00066 query unchanged, returned as one expression; work_mem stays at the
+-- 64 MB from 00110. Verified md5-identical output before and after on four
+-- argument sets (all-time, 30-day, 7-day with platform, 7-day with model and
+-- region).
+--
+-- If this function is recreated, keep it plpgsql with these settings.
+
+create or replace function public.competitor_aggregates_daily(
+  p_brand_id uuid,
+  p_platform text default null,
+  p_models text[] default null,
+  p_region text default null,
+  p_day_from date default null,
+  p_day_to date default null
+) returns jsonb
+language plpgsql
+stable
+set search_path to 'public'
+set work_mem to '64MB'
+set plan_cache_mode to 'force_custom_plan'
+as $$
+begin
+  return (
+    with brand_days as (
+      select * from public.insights_brand_daily d
+      where d.brand_id = p_brand_id
+        and (p_platform is null or d.platform = p_platform)
+        and (p_models is null or d.model_used = any (p_models))
+        and (p_region is null or d.region = p_region)
+        and (p_day_from is null or d.day >= p_day_from)
+        and (p_day_to is null or d.day <= p_day_to)
+    ),
+    prompt_days as (
+      select * from public.insights_prompt_daily d
+      where d.brand_id = p_brand_id
+        and (p_platform is null or d.platform = p_platform)
+        and (p_models is null or d.model_used = any (p_models))
+        and (p_region is null or d.region = p_region)
+        and (p_day_from is null or d.day >= p_day_from)
+        and (p_day_to is null or d.day <= p_day_to)
+    ),
+    comp_days as (
+      select cd.* from public.insights_competitor_daily cd
+      join public.competitors c
+        on c.id::text = cd.competitor_id and c.brand_id = p_brand_id
+      where cd.brand_id = p_brand_id
+        and (p_platform is null or cd.platform = p_platform)
+        and (p_models is null or cd.model_used = any (p_models))
+        and (p_region is null or cd.region = p_region)
+        and (p_day_from is null or cd.day >= p_day_from)
+        and (p_day_to is null or cd.day <= p_day_to)
+    ),
+    comp_prompt_days as (
+      select cpd.* from public.insights_competitor_prompt_daily cpd
+      join public.competitors c
+        on c.id::text = cpd.competitor_id and c.brand_id = p_brand_id
+      where cpd.brand_id = p_brand_id
+        and (p_platform is null or cpd.platform = p_platform)
+        and (p_models is null or cpd.model_used = any (p_models))
+        and (p_region is null or cpd.region = p_region)
+        and (p_day_from is null or cpd.day >= p_day_from)
+        and (p_day_to is null or cpd.day <= p_day_to)
+    ),
+    brand_totals as (
+      select
+        coalesce((select sum(answer_count) from brand_days), 0)    as row_count,
+        coalesce((select sum(sum_visibility) from brand_days), 0)  as sum_visibility,
+        coalesce((select sum(total_mentions) from brand_days), 0)  as total_mentions,
+        coalesce((select sum(total_citations) from brand_days), 0) as total_citations,
+        (select count(distinct prompt_id) from prompt_days)        as prompt_count,
+        (select count(distinct prompt_id) from prompt_days
+          where has_mention or has_citation)                       as visible_prompts
+    ),
+    by_brand_provider as (
+      select b.model_used, b.platform, b.sum_visibility, b.row_count,
+             p.prompt_count, p.visible_prompts
+      from (
+        select model_used, platform,
+               sum(sum_visibility) as sum_visibility,
+               sum(answer_count)   as row_count
+        from brand_days group by model_used, platform
+      ) b
+      join (
+        select model_used, platform,
+               count(distinct prompt_id) as prompt_count,
+               count(distinct prompt_id)
+                 filter (where has_mention or has_citation) as visible_prompts
+        from prompt_days group by model_used, platform
+      ) p on p.model_used is not distinct from b.model_used
+         and p.platform is not distinct from b.platform
+    ),
+    -- Grouped once each, then joined — a correlated subselect here rescans
+    -- comp_prompt_days per output group (13 + ~119 of them), which measured
+    -- 1.6s on the largest brand's all-time window against ~100ms this way.
+    visible_by_comp as (
+      select competitor_id, count(distinct prompt_id) as visible_prompts
+      from comp_prompt_days group by competitor_id
+    ),
+    visible_by_comp_engine as (
+      select competitor_id, model_used, platform,
+             count(distinct prompt_id) as visible_prompts
+      from comp_prompt_days group by competitor_id, model_used, platform
+    ),
+    by_competitor as (
+      select
+        cd.competitor_id,
+        max(c.name)               as name,
+        sum(cd.sum_visibility)    as sum_visibility,
+        sum(cd.answer_count)      as row_count,
+        coalesce(sum(cd.total_mentions), 0)::bigint  as total_mentions,
+        coalesce(sum(cd.total_citations), 0)::bigint as total_citations,
+        coalesce(max(v.visible_prompts), 0)          as visible_prompts
+      from comp_days cd
+      join public.competitors c
+        on c.id::text = cd.competitor_id and c.brand_id = p_brand_id
+      left join visible_by_comp v on v.competitor_id = cd.competitor_id
+      group by cd.competitor_id
+    ),
+    by_competitor_provider as (
+      select
+        cd.model_used, cd.platform, cd.competitor_id,
+        max(c.name)                         as competitor_name,
+        sum(cd.sum_visibility)              as sum_visibility,
+        sum(cd.answer_count)                as row_count,
+        coalesce(max(v.visible_prompts), 0) as visible_prompts
+      from comp_days cd
+      join public.competitors c
+        on c.id::text = cd.competitor_id and c.brand_id = p_brand_id
+      left join visible_by_comp_engine v
+        on v.competitor_id = cd.competitor_id
+       and v.model_used is not distinct from cd.model_used
+       and v.platform is not distinct from cd.platform
+      group by cd.model_used, cd.platform, cd.competitor_id
+    )
+    select jsonb_build_object(
+      'brand_row_count',       b.row_count,
+      'brand_sum_visibility',  b.sum_visibility,
+      'brand_total_mentions',  b.total_mentions,
+      'brand_total_citations', b.total_citations,
+      'brand_prompt_count',    b.prompt_count,
+      'brand_visible_prompts', b.visible_prompts,
+      'by_competitor', coalesce(
+        (select jsonb_agg(jsonb_build_object(
+                  'competitor_id',   bc.competitor_id,
+                  'name',            bc.name,
+                  'sum_visibility',  bc.sum_visibility,
+                  'row_count',       bc.row_count,
+                  'total_mentions',  bc.total_mentions,
+                  'total_citations', bc.total_citations,
+                  'visible_prompts', bc.visible_prompts)
+                order by bc.row_count desc, bc.competitor_id)
+         from by_competitor bc),
+        '[]'::jsonb),
+      'by_brand_provider', coalesce(
+        (select jsonb_agg(jsonb_build_object(
+                  'model_used',      bbp.model_used,
+                  'platform',        bbp.platform,
+                  'sum_visibility',  bbp.sum_visibility,
+                  'row_count',       bbp.row_count,
+                  'prompt_count',    bbp.prompt_count,
+                  'visible_prompts', bbp.visible_prompts)
+                order by bbp.platform nulls last, bbp.model_used nulls last)
+         from by_brand_provider bbp),
+        '[]'::jsonb),
+      'by_competitor_provider', coalesce(
+        (select jsonb_agg(jsonb_build_object(
+                  'model_used',      bcp.model_used,
+                  'platform',        bcp.platform,
+                  'competitor_id',   bcp.competitor_id,
+                  'competitor_name', bcp.competitor_name,
+                  'sum_visibility',  bcp.sum_visibility,
+                  'row_count',       bcp.row_count,
+                  'visible_prompts', bcp.visible_prompts)
+                order by bcp.platform nulls last, bcp.model_used nulls last, bcp.competitor_id)
+         from by_competitor_provider bcp),
+        '[]'::jsonb)
+    )
+    from brand_totals b
+  );
+end;
+$$;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00114_opportunity_status_since_reopen.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- A re-opened opportunity's status follows only the work sent after it
+-- re-opened (#857, Phase 4).
+--
+-- A finished opportunity whose signals move goes back to New and records
+-- when in source_data.reopened.at. Its earlier actions are complete; counted
+-- with a new one, they would show the new work as In Progress the moment it
+-- was sent. sync_opportunity_status (00106) now ignores actions created
+-- before that moment.
+
+create or replace function public.sync_opportunity_status()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  opp uuid := nullif(new.payload->>'opportunityId', '')::uuid;
+  since timestamptz;
+  next_status text;
+begin
+  if opp is null then
+    return new;
+  end if;
+
+  select nullif(source_data->'reopened'->>'at', '')::timestamptz
+    into since
+    from content_opportunities
+   where id = opp;
+
+  select case
+           when count(*) = 0 then null
+           when count(*) filter (where a.status <> 'dismissed') = 0 then 'reviewed'
+           when count(*) filter (where a.status not in ('completed', 'dismissed')) = 0 then 'done'
+           when count(*) filter (where a.status in ('in_progress', 'on_hold', 'completed')) > 0
+             then 'in_progress'
+           else 'sent'
+         end
+    into next_status
+    from actions a
+   where a.kind = 'content_opportunity'
+     and a.brand_id = new.brand_id
+     and a.payload->>'opportunityId' = opp::text
+     and (since is null or a.created_at >= since);
+
+  -- Only earlier work changed: the re-opened opportunity stays as it is.
+  if next_status is null then
+    return new;
+  end if;
+
+  update content_opportunities
+     set status = next_status, updated_at = now()
+   where id = opp
+     and brand_id = new.brand_id
+     and status in ('new', 'reviewed', 'sent', 'in_progress', 'done')
+     and status <> next_status;
+
+  return new;
+end;
+$$;
+
+revoke all on function public.sync_opportunity_status() from public, anon, authenticated;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00115_shopping_overview.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Shopping: compute the Overview tab in the database (#922).
+--
+-- The Overview KPIs, the per-platform card rate and the 30-day trend were
+-- aggregated in JavaScript from rows fetched without paging, so PostgREST's
+-- 1,000-row cap silently truncated them: the largest brand's 30-day window has
+-- ~5.8k cards and ~117k results. The card-bearing count also filtered on the
+-- wide `shopping_cards` jsonb column, an 11 s heap scan on that brand, past the
+-- 8 s statement timeout. Here a result "has cards" when it has a row in
+-- prompt_result_shopping_cards, read from that table's unique index, and the
+-- results themselves come from the covering (brand_id, created_at) index:
+-- ~0.5 s on the same window.
+--
+-- Security invoker: the caller's RLS on prompt_results and
+-- prompt_result_shopping_cards still applies.
+
+create or replace function public.shopping_overview(
+  p_brand_id uuid,
+  p_from timestamptz default null,
+  p_to timestamptz default null,
+  p_platforms text[] default null,
+  p_regions text[] default null,
+  p_trend_from timestamptz default null
+) returns jsonb
+language plpgsql
+stable
+set search_path to 'public'
+set plan_cache_mode to 'force_custom_plan'
+as $$
+begin
+  return (
+    with results as materialized (
+      select r.id, r.platform
+      from public.prompt_results r
+      where r.brand_id = p_brand_id
+        and (p_from is null or r.created_at >= p_from)
+        and (p_to is null or r.created_at <= p_to)
+        and (p_platforms is null or r.platform = any (p_platforms))
+        and (p_regions is null or r.region = any (p_regions))
+    ),
+    by_platform as (
+      select res.platform,
+             count(*) as total_results,
+             count(*) filter (where exists (
+               select 1 from public.prompt_result_shopping_cards c
+               where c.prompt_result_id = res.id
+             )) as results_with_cards
+      from results res
+      group by res.platform
+    ),
+    cards as materialized (
+      select c.matched_brand_role, c.merchant_domain
+      from public.prompt_result_shopping_cards c
+      where c.brand_id = p_brand_id
+        and (p_from is null or c.created_at >= p_from)
+        and (p_to is null or c.created_at <= p_to)
+        and (p_platforms is null or c.platform = any (p_platforms))
+        and (p_regions is null or c.region = any (p_regions))
+    ),
+    top_merchant as (
+      select merchant_domain, count(*) as card_count
+      from cards
+      where matched_brand_role = 'own' and merchant_domain is not null
+      group by merchant_domain
+      order by count(*) desc, merchant_domain
+      limit 1
+    ),
+    trend as (
+      select (c.created_at at time zone 'UTC')::date as day,
+             count(*) filter (where c.matched_brand_role = 'own') as own_cards,
+             count(*) as total_cards
+      from public.prompt_result_shopping_cards c
+      where c.brand_id = p_brand_id
+        and p_trend_from is not null
+        and c.created_at >= p_trend_from
+        and (p_platforms is null or c.platform = any (p_platforms))
+        and (p_regions is null or c.region = any (p_regions))
+      group by 1
+    )
+    select jsonb_build_object(
+      'total_results',       coalesce((select sum(total_results) from by_platform), 0),
+      'results_with_cards',  coalesce((select sum(results_with_cards) from by_platform), 0),
+      'total_cards',         (select count(*) from cards),
+      'own_cards',           (select count(*) from cards where matched_brand_role = 'own'),
+      'top_merchant',        (select jsonb_build_object('domain', merchant_domain,
+                                                        'card_count', card_count)
+                              from top_merchant),
+      'by_platform', coalesce(
+        (select jsonb_agg(jsonb_build_object(
+                  'platform',           platform,
+                  'total_results',      total_results,
+                  'results_with_cards', results_with_cards)
+                order by platform)
+         from by_platform),
+        '[]'::jsonb),
+      'trend', coalesce(
+        (select jsonb_agg(jsonb_build_object(
+                  'day',         day,
+                  'own_cards',   own_cards,
+                  'total_cards', total_cards)
+                order by day)
+         from trend),
+        '[]'::jsonb)
+    )
+  );
+end;
+$$;
+
+-- The Shopping filter bar's platform and region options, from every result the
+-- brand has: the previous read took the first 1,000 results only.
+create or replace function public.shopping_filter_options(p_brand_id uuid)
+returns table(platforms text[], regions text[])
+language sql
+stable
+set search_path to 'public'
+as $$
+  select
+    coalesce((
+      select array_agg(distinct r.platform order by r.platform)
+      from public.prompt_results r
+      where r.brand_id = p_brand_id
+        and r.platform is not null and r.platform <> ''
+    ), '{}') as platforms,
+    coalesce((
+      select array_agg(distinct r.region order by r.region)
+      from public.prompt_results r
+      where r.brand_id = p_brand_id
+        and r.region is not null and r.region <> ''
+    ), '{}') as regions
+$$;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00116_opportunity_basket_metrics.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- What an action sent from a content opportunity is measured on (#857,
+-- Phase 4): the opportunity's own basket, not the whole brand.
+--
+-- The Action Center measures an action's KPIs over a window before it was
+-- raised and one after it closed. For signal-driven actions that reads the
+-- whole brand, which is right for them. For a piece of content answering 20
+-- of a brand's 700 prompts, the brand-wide numbers bury its effect, so these
+-- actions read the same windows over just their prompts and pages.
+--
+-- One call returns the raw figures for one window; the server turns them
+-- into metrics. Prompt figures come from the Insights rollups (00066), page
+-- citations from the citation tables, page traffic from GA's AI traffic.
+--
+-- p_page_keys are page URLs lower-cased without scheme, www., query,
+-- fragment or trailing slash; p_page_domains their hosts without www., which
+-- narrows citation_urls through its domain index before the key match.
+-- p_page_paths are the same pages as GA landing-page paths.
+
+create or replace function public.opportunity_basket_metrics(
+  p_brand_id uuid,
+  p_prompt_ids uuid[],
+  p_page_keys text[],
+  p_page_domains text[],
+  p_page_paths text[],
+  p_from date,
+  p_to date
+)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  with cells as (
+    select count(*) as cells,
+           count(*) filter (where has_mention or has_citation) as visible,
+           coalesce(sum(answer_count) filter (where has_mention), 0) as mention_answers
+    from insights_prompt_daily
+    where brand_id = p_brand_id
+      and day between p_from and p_to
+      and prompt_id = any(p_prompt_ids)
+  ),
+  comp as (
+    select d.competitor_id, count(*) as visible
+    from insights_competitor_prompt_daily d
+    join competitors c on c.id::text = d.competitor_id and c.brand_id = p_brand_id
+    where d.brand_id = p_brand_id
+      and d.day between p_from and p_to
+      and d.prompt_id = any(p_prompt_ids)
+    group by d.competitor_id
+  ),
+  urls as (
+    select id
+    from citation_urls
+    where domain = any(p_page_domains)
+      and rtrim(
+            regexp_replace(split_part(split_part(lower(url), '#', 1), '?', 1), '^https?://(www\.)?', ''),
+            '/'
+          ) = any(p_page_keys)
+  )
+  select jsonb_build_object(
+    'cells', (select cells from cells),
+    'visible', (select visible from cells),
+    'mention_answers', (select mention_answers from cells),
+    'competitor_visible_total', (select coalesce(sum(visible), 0) from comp),
+    'top_competitor_visible', (select coalesce(max(visible), 0) from comp),
+    'page_citations', (
+      select count(*)
+      from prompt_result_citations
+      where brand_id = p_brand_id
+        and created_at >= p_from
+        and created_at < p_to + 1
+        and url_id in (select id from urls)
+    ),
+    'ga_connected', exists (
+      select 1 from ga_ai_traffic_stats
+      where brand_id = p_brand_id and date between p_from and p_to
+    ),
+    'page_ai_sessions', (
+      select coalesce(sum(sessions), 0)
+      from ga_ai_traffic_stats
+      where brand_id = p_brand_id
+        and date between p_from and p_to
+        and coalesce(nullif(rtrim(split_part(landing_page, '?', 1), '/'), ''), '/') = any(p_page_paths)
+    )
+  );
+$$;
+
+revoke all on function public.opportunity_basket_metrics(uuid, uuid[], text[], text[], text[], date, date)
+  from public, anon, authenticated;
+grant execute on function public.opportunity_basket_metrics(uuid, uuid[], text[], text[], text[], date, date)
+  to service_role;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00117_delete_brand_results_batch.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Deleting a brand in batches.
+--
+-- A brand delete cascades to every answer it ever received, and from each
+-- answer to its citation rows and shopping cards. A brand with 15,000 answers
+-- carries well over 100,000 citation rows. Run as one statement under the
+-- authenticated role's 8-second statement timeout, the delete was cancelled
+-- every time, and the brand stayed.
+--
+-- The server now deletes a brand's answers in batches with this function,
+-- each batch a short statement of its own, and deletes the brand row once
+-- they are gone.
+
+create or replace function public.delete_brand_results_batch(
+  p_brand_id uuid,
+  p_limit integer default 2000
+)
+returns integer
+language plpgsql
+set search_path = public
+as $$
+declare
+  deleted integer;
+begin
+  delete from prompt_results
+   where id in (
+     select id from prompt_results where brand_id = p_brand_id limit p_limit
+   );
+  get diagnostics deleted = row_count;
+  return deleted;
+end;
+$$;
+
+revoke all on function public.delete_brand_results_batch(uuid, integer) from public, anon, authenticated;
+grant execute on function public.delete_brand_results_batch(uuid, integer) to service_role;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- migrations/00118_citations_daily_rollups.sql
+-- ─────────────────────────────────────────────────────────────────────────
+-- Citations stops recomputing the window on every page load.
+--
+-- The Citations overview aggregated prompt_result_citations per request. On
+-- the largest brand a 30-day window is 935k citation rows over 128k URLs and
+-- 15.8k domains: citations_domains took 17s against the authenticated role's
+-- 8s statement timeout, and every brand's window grows with its history.
+--
+-- Same cure as Insights (00066): each brand-day is aggregated once, when the
+-- brand's tracking run completes, with the daily sweep as backstop, and the
+-- page reads the daily rows. Measured on the largest brand's 30 days: the
+-- domain table in 0.06s and the top 2,000 URLs in 0.25s.
+--
+-- Grain: (day, model_used, platform, region, topic_id) — the page's filter
+-- dimensions. A result belongs to exactly one bucket, so results_citing sums
+-- across days, engines, regions and topics without double counting. A prompt
+-- grain was measured too and compresses nothing (886k rows for 935k
+-- citations), so a single-prompt filter stays on the raw functions, which a
+-- single prompt keeps small.
+--
+-- Topic is stored rather than joined at read time. Moving a prompt to another
+-- topic (or deleting it) therefore queues its brand in
+-- citation_rollup_rebuilds, and the daily sweep recomputes that brand's
+-- history. Until then only topic-filtered views show the old attribution;
+-- unfiltered totals are unaffected.
+--
+-- The raw functions stay: the per-prompt filter, Competitor Gaps, the URL
+-- detail page, MCP and reports still call them.
+
+-- ─── Tables ─────────────────────────────────────────────────────────────────
+
+-- Answers per bucket: the denominator of every usage %, and the regions list.
+create table if not exists public.citation_result_daily (
+  brand_id   uuid not null references public.brands(id) on delete cascade,
+  day        date not null,
+  model_used text,
+  platform   text,
+  region     text,
+  topic_id   uuid,
+  answers    integer not null
+);
+
+create index if not exists idx_citation_result_daily_brand_day
+  on public.citation_result_daily (brand_id, day);
+
+create table if not exists public.citation_domain_daily (
+  brand_id   uuid not null references public.brands(id) on delete cascade,
+  day        date not null,
+  model_used text,
+  platform   text,
+  region     text,
+  topic_id   uuid,
+  domain     text not null,
+  citations  integer not null,
+  -- Answers citing at least one URL of the domain.
+  results    integer not null
+);
+
+create index if not exists idx_citation_domain_daily_brand_day
+  on public.citation_domain_daily (brand_id, day);
+
+create table if not exists public.citation_url_daily (
+  brand_id   uuid not null references public.brands(id) on delete cascade,
+  day        date not null,
+  model_used text,
+  platform   text,
+  region     text,
+  topic_id   uuid,
+  url_id     bigint not null,
+  citations  integer not null,
+  -- Answers citing the URL.
+  results    integer not null
+);
+
+create index if not exists idx_citation_url_daily_brand_day
+  on public.citation_url_daily (brand_id, day);
+
+-- Brands whose prompts changed topic since their rollups were written. No
+-- foreign key on purpose: deleting a brand cascades through its prompts, and
+-- the trigger below must never make that delete fail. A brand gone by the
+-- time the sweep reads its entry has no results, so the rebuild is a no-op
+-- and the entry is cleared.
+create table if not exists public.citation_rollup_rebuilds (
+  brand_id     uuid primary key,
+  requested_at timestamptz not null default now()
+);
+
+-- ─── RLS — same shape as the Insights rollups ───────────────────────────────
+
+alter table public.citation_result_daily enable row level security;
+alter table public.citation_domain_daily enable row level security;
+alter table public.citation_url_daily enable row level security;
+-- Service role only: no policies.
+alter table public.citation_rollup_rebuilds enable row level security;
+
+drop policy if exists "Users can read own org citation result rollups" on public.citation_result_daily;
+create policy "Users can read own org citation result rollups"
+  on public.citation_result_daily for select
+  using (brand_id in (
+    select b.id from public.brands b
+    join public.profiles p on p.organization_id = b.organization_id
+    where p.id = auth.uid()));
+
+drop policy if exists "Users can read own org citation domain rollups" on public.citation_domain_daily;
+create policy "Users can read own org citation domain rollups"
+  on public.citation_domain_daily for select
+  using (brand_id in (
+    select b.id from public.brands b
+    join public.profiles p on p.organization_id = b.organization_id
+    where p.id = auth.uid()));
+
+drop policy if exists "Users can read own org citation url rollups" on public.citation_url_daily;
+create policy "Users can read own org citation url rollups"
+  on public.citation_url_daily for select
+  using (brand_id in (
+    select b.id from public.brands b
+    join public.profiles p on p.organization_id = b.organization_id
+    where p.id = auth.uid()));
+
+-- ─── Refresh ────────────────────────────────────────────────────────────────
+
+-- Recompute one brand's citation rollups for an inclusive UTC day range:
+-- delete + insert, so it is idempotent and safe to rerun. Called by the
+-- server under the service role (run completion, the daily sweep, the topic
+-- rebuild and the backfill script).
+create or replace function public.refresh_citations_daily(
+  p_brand_id uuid,
+  p_day_from date,
+  p_day_to date
+) returns void
+language plpgsql
+set search_path to 'public'
+set work_mem to '256MB'
+as $$
+declare
+  ts_from timestamptz := p_day_from::timestamp at time zone 'utc';
+  ts_to   timestamptz := (p_day_to + 1)::timestamp at time zone 'utc';
+begin
+  delete from public.citation_result_daily
+    where brand_id = p_brand_id and day between p_day_from and p_day_to;
+  delete from public.citation_domain_daily
+    where brand_id = p_brand_id and day between p_day_from and p_day_to;
+  delete from public.citation_url_daily
+    where brand_id = p_brand_id and day between p_day_from and p_day_to;
+
+  insert into public.citation_result_daily (
+    brand_id, day, model_used, platform, region, topic_id, answers)
+  select p_brand_id,
+         (pr.created_at at time zone 'utc')::date,
+         pr.model_used, pr.platform, pr.region, p.topic_id,
+         count(*)
+  from public.prompt_results pr
+  left join public.prompts p on p.id = pr.prompt_id
+  where pr.brand_id = p_brand_id
+    and pr.platform <> 'chatgpt-shopping'  -- #155 — isolate from analytics
+    and pr.created_at >= ts_from and pr.created_at < ts_to
+  group by 2, pr.model_used, pr.platform, pr.region, p.topic_id;
+
+  -- A citation row carries its answer's created_at, so the citation index
+  -- bounds the scan; the answer supplies the bucket.
+  insert into public.citation_domain_daily (
+    brand_id, day, model_used, platform, region, topic_id, domain, citations, results)
+  select p_brand_id,
+         (pr.created_at at time zone 'utc')::date,
+         pr.model_used, pr.platform, pr.region, p.topic_id, cu.domain,
+         count(*),
+         count(distinct c.prompt_result_id)
+  from public.prompt_result_citations c
+  join public.prompt_results pr on pr.id = c.prompt_result_id
+  left join public.prompts p on p.id = pr.prompt_id
+  join public.citation_urls cu on cu.id = c.url_id
+  where c.brand_id = p_brand_id
+    and c.created_at >= ts_from and c.created_at < ts_to
+    and pr.platform <> 'chatgpt-shopping'
+  group by 2, pr.model_used, pr.platform, pr.region, p.topic_id, cu.domain;
+
+  insert into public.citation_url_daily (
+    brand_id, day, model_used, platform, region, topic_id, url_id, citations, results)
+  select p_brand_id,
+         (pr.created_at at time zone 'utc')::date,
+         pr.model_used, pr.platform, pr.region, p.topic_id, c.url_id,
+         count(*),
+         count(distinct c.prompt_result_id)
+  from public.prompt_result_citations c
+  join public.prompt_results pr on pr.id = c.prompt_result_id
+  left join public.prompts p on p.id = pr.prompt_id
+  where c.brand_id = p_brand_id
+    and c.created_at >= ts_from and c.created_at < ts_to
+    and pr.platform <> 'chatgpt-shopping'
+  group by 2, pr.model_used, pr.platform, pr.region, p.topic_id, c.url_id;
+end;
+$$;
+
+revoke execute on function public.refresh_citations_daily(uuid, date, date)
+  from public, anon, authenticated;
+
+-- ─── Topic moves queue a rebuild ────────────────────────────────────────────
+
+create or replace function public.queue_citation_rollup_rebuild()
+returns trigger
+language plpgsql
+security definer
+set search_path to 'public'
+as $$
+declare
+  v_set uuid := case when tg_op = 'DELETE' then old.prompt_set_id else new.prompt_set_id end;
+begin
+  if tg_op = 'UPDATE' and new.topic_id is not distinct from old.topic_id then
+    return new;
+  end if;
+  -- Only for a brand that still exists: during a brand delete the cascade
+  -- removes the brand first, so its prompts queue nothing.
+  insert into public.citation_rollup_rebuilds (brand_id)
+  select ps.brand_id from public.prompt_sets ps
+  join public.brands b on b.id = ps.brand_id
+  where ps.id = v_set
+  on conflict (brand_id) do update set requested_at = now();
+  return null;
+end;
+$$;
+
+revoke execute on function public.queue_citation_rollup_rebuild()
+  from public, anon, authenticated;
+
+drop trigger if exists prompts_queue_citation_rollup_rebuild on public.prompts;
+create trigger prompts_queue_citation_rollup_rebuild
+  after update of topic_id or delete on public.prompts
+  for each row execute function public.queue_citation_rollup_rebuild();
+
+-- ─── Reads ──────────────────────────────────────────────────────────────────
+-- Security invoker: the RLS policies above scope every read to the caller's
+-- organization. plpgsql with force_custom_plan so each call is planned with
+-- its own brand and window (00113).
+
+create or replace function public.citations_domains_daily(
+  p_brand_id uuid,
+  p_day_from date default null,
+  p_day_to date default null,
+  p_models text[] default null,
+  p_regions text[] default null,
+  p_topic_ids uuid[] default null
+) returns table(domain text, total_citations bigint, results_citing bigint, models text[])
+language plpgsql
+stable
+set search_path to 'public'
+set work_mem to '64MB'
+set plan_cache_mode to 'force_custom_plan'
+as $$
+#variable_conflict use_column
+begin
+  return query
+  select d.domain,
+         sum(d.citations)::bigint,
+         sum(d.results)::bigint,
+         array_agg(distinct coalesce(d.model_used, d.platform))
+  from public.citation_domain_daily d
+  where d.brand_id = p_brand_id
+    and (p_day_from  is null or d.day >= p_day_from)
+    and (p_day_to    is null or d.day <= p_day_to)
+    and (p_models    is null or d.model_used = any(p_models))
+    and (p_regions   is null or d.region = any(p_regions))
+    and (p_topic_ids is null or d.topic_id = any(p_topic_ids))
+  group by d.domain
+  order by 2 desc;
+end;
+$$;
+
+create or replace function public.citations_urls_daily(
+  p_brand_id uuid,
+  p_day_from date default null,
+  p_day_to date default null,
+  p_models text[] default null,
+  p_regions text[] default null,
+  p_topic_ids uuid[] default null,
+  p_limit integer default 2000,
+  p_domains text[] default null,
+  p_exclude_domains text[] default null
+) returns table(url text, domain text, title text, total_citations bigint,
+                results_citing bigint, models text[], total_urls bigint)
+language plpgsql
+stable
+set search_path to 'public'
+set work_mem to '64MB'
+set plan_cache_mode to 'force_custom_plan'
+as $$
+#variable_conflict use_column
+begin
+  return query
+  with agg as (
+    select u.url_id as uid,
+           sum(u.citations)::bigint as tc,
+           sum(u.results)::bigint as rc,
+           array_agg(distinct coalesce(u.model_used, u.platform)) as ms
+    from public.citation_url_daily u
+    where u.brand_id = p_brand_id
+      and (p_day_from  is null or u.day >= p_day_from)
+      and (p_day_to    is null or u.day <= p_day_to)
+      and (p_models    is null or u.model_used = any(p_models))
+      and (p_regions   is null or u.region = any(p_regions))
+      and (p_topic_ids is null or u.topic_id = any(p_topic_ids))
+    group by u.url_id
+  ),
+  include_ids as (
+    select cu.id from public.citation_urls cu
+    where p_domains is not null and cu.domain = any(p_domains)
+  ),
+  exclude_ids as (
+    select cu.id from public.citation_urls cu
+    where p_exclude_domains is not null and cu.domain = any(p_exclude_domains)
+  ),
+  scoped as materialized (
+    select a.*
+    from agg a
+    where (p_domains is null
+           or exists (select 1 from include_ids i where i.id = a.uid))
+      and (p_exclude_domains is null
+           or not exists (select 1 from exclude_ids e where e.id = a.uid))
+  )
+  select cu.url, cu.domain, cu.title, a.tc, a.rc, a.ms,
+         (select count(*)::bigint from scoped)
+  from (select * from scoped order by tc desc, uid limit p_limit) a
+  join public.citation_urls cu on cu.id = a.uid
+  order by a.tc desc;
+end;
+$$;
+
+create or replace function public.citations_window_stats_daily(
+  p_brand_id uuid,
+  p_day_from date default null,
+  p_day_to date default null,
+  p_models text[] default null,
+  p_regions text[] default null,
+  p_topic_ids uuid[] default null
+) returns table(results bigint, regions text[])
+language plpgsql
+stable
+set search_path to 'public'
+set plan_cache_mode to 'force_custom_plan'
+as $$
+#variable_conflict use_column
+begin
+  return query
+  select coalesce(sum(r.answers), 0)::bigint,
+         coalesce(array_agg(distinct r.region) filter (where r.region is not null), '{}')
+  from public.citation_result_daily r
+  where r.brand_id = p_brand_id
+    and (p_day_from  is null or r.day >= p_day_from)
+    and (p_day_to    is null or r.day <= p_day_to)
+    and (p_models    is null or r.model_used = any(p_models))
+    and (p_regions   is null or r.region = any(p_regions))
+    and (p_topic_ids is null or r.topic_id = any(p_topic_ids));
+end;
+$$;
+
+-- ─── Health report probes ───────────────────────────────────────────────────
+-- The daily health report times the page's reads (00108). The Citations page
+-- now reads the daily functions, so the report can time those: same body as
+-- 00108 plus two probes. Their window counts today, as the page's does.
+
+create or replace function public.health_probe(
+  p_user_id uuid,
+  p_brand_id uuid,
+  p_probe text,
+  p_days integer default null
+) returns numeric
+language plpgsql
+security invoker
+set search_path to 'public'
+as $$
+declare
+  t0 timestamptz;
+  ts_from timestamptz := case when p_days is null then null else now() - make_interval(days => p_days) end;
+  day_from date := (now() at time zone 'utc')::date - coalesce(p_days, 0);
+  page_day_from date := case when p_days is null then null
+                             else (now() at time zone 'utc')::date - (p_days - 1) end;
+  n bigint;
+begin
+  perform set_config('role', 'authenticated', true);
+  perform set_config(
+    'request.jwt.claims',
+    json_build_object('sub', p_user_id, 'role', 'authenticated')::text,
+    true
+  );
+  t0 := clock_timestamp();
+
+  case p_probe
+    when 'citations_window_stats' then
+      select count(*) into n from public.citations_window_stats(
+        p_brand_id => p_brand_id, p_date_from => ts_from, p_date_to => null,
+        p_models => null, p_regions => null, p_prompt_ids => null, p_topic_ids => null);
+    when 'citations_domains' then
+      select count(*) into n from public.citations_domains(
+        p_brand_id => p_brand_id, p_date_from => ts_from, p_date_to => null,
+        p_models => null, p_regions => null, p_prompt_ids => null, p_topic_ids => null);
+    when 'citations_urls' then
+      select count(*) into n from public.citations_urls(
+        p_brand_id => p_brand_id, p_date_from => ts_from, p_date_to => null,
+        p_models => null, p_regions => null, p_prompt_ids => null, p_topic_ids => null,
+        p_limit => 100, p_domains => null, p_exclude_domains => null);
+    when 'citations_domains_daily' then
+      select count(*) into n from public.citations_domains_daily(
+        p_brand_id => p_brand_id, p_day_from => page_day_from, p_day_to => null);
+    when 'citations_urls_daily' then
+      select count(*) into n from public.citations_urls_daily(
+        p_brand_id => p_brand_id, p_day_from => page_day_from, p_day_to => null,
+        p_limit => 2000);
+    when 'insights_aggregates_daily' then
+      select count(*) into n from public.insights_aggregates_daily(
+        p_brand_id => p_brand_id, p_platform => null, p_models => null, p_region => null,
+        p_day_from => case when p_days is null then null else day_from end, p_day_to => null);
+    when 'competitor_aggregates_daily' then
+      select count(*) into n from public.competitor_aggregates_daily(
+        p_brand_id => p_brand_id, p_platform => null, p_models => null, p_region => null,
+        p_day_from => case when p_days is null then null else day_from end, p_day_to => null);
+    when 'topics_overview_aggregates' then
+      select count(*) into n from public.topics_overview_aggregates(p_brand_id => p_brand_id);
+    else
+      raise exception 'unknown health probe: %', p_probe;
+  end case;
+
+  return round(extract(epoch from clock_timestamp() - t0)::numeric, 2);
+end;
+$$;
+
+revoke all on function public.health_probe(uuid, uuid, text, integer) from public, anon, authenticated;
+grant execute on function public.health_probe(uuid, uuid, text, integer) to service_role;
+

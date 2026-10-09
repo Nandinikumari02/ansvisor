@@ -6,6 +6,7 @@ import {
   AlertCircle,
   ArrowUpDown,
   CircleDot,
+  Download,
   ListChecks,
   Search,
   Shield,
@@ -17,6 +18,7 @@ import { useBrandStore } from '@/stores/use-brand-store';
 import type { Brand } from '@/types';
 import { getActions, type ActionItem } from '@/lib/actions/action-center';
 import { listMembers, type TeamMember } from '@/lib/actions/team';
+import { readUrlChoice, readUrlParam, writeUrlParams } from '@/lib/url-state';
 import {
   ACTION_CATEGORIES,
   ACTION_IMPACTS,
@@ -48,6 +50,20 @@ import {
 } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
+import { toCsv } from '@/lib/csv';
+
+const ACTION_EXPORT_HEADERS = [
+  'number',
+  'title',
+  'category',
+  'impact',
+  'status',
+  'assignee',
+  'due_date',
+  'tasks_done_total',
+  'signal_count',
+  'created',
+];
 
 const OPEN_STATUSES: ActionStatus[] = ['new', 'in_progress', 'on_hold'];
 
@@ -97,6 +113,7 @@ export default function ActionCenterActionsPage() {
 
 function ActionsContent({ brand }: { brand: Brand }) {
   const t = useTranslations('actionCenter.actionsPage');
+  const common = useTranslations('common');
   const tTexts = useTranslations('actionCenter.actionTexts');
   const tCategories = useTranslations('actionCenter.actionCategories');
 
@@ -112,6 +129,35 @@ function ActionsContent({ brand }: { brand: Brand }) {
   const [sort, setSort] = useState<ActionSort>('priority');
   const [search, setSearch] = useState('');
   const [focus, setFocus] = useState<CardFocus | null>(null);
+
+  // Filters, sort and search live in the URL (#896) so a refresh keeps them
+  // and a filtered view can be shared. Read after mount; defaults stay out.
+  const [urlRead, setUrlRead] = useState(false);
+  useEffect(() => {
+    setCategory(
+      readUrlChoice<ActionCategory | 'all'>('category', ['all', ...ACTION_CATEGORIES], 'all'),
+    );
+    setImpact(readUrlChoice<ActionImpact | 'all'>('impact', ['all', ...ACTION_IMPACTS], 'all'));
+    setStatus(readUrlChoice<ActionStatus | 'all'>('status', ['all', ...ACTION_STATUSES], 'all'));
+    setAssignee(readUrlParam('assignee') || 'all');
+    setSort(readUrlChoice<ActionSort>('sort', ACTION_SORTS, 'priority'));
+    setSearch(readUrlParam('q'));
+    setUrlRead(true);
+  }, []);
+
+  useEffect(() => {
+    if (!urlRead) return;
+    // Debounced, so typing in search doesn't rewrite the URL on every key.
+    const timer = setTimeout(
+      () =>
+        writeUrlParams(
+          { category, impact, status, assignee, sort, q: search.trim() },
+          { category: 'all', impact: 'all', status: 'all', assignee: 'all', sort: 'priority' },
+        ),
+      300,
+    );
+    return () => clearTimeout(timer);
+  }, [urlRead, category, impact, status, assignee, sort, search]);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -144,6 +190,12 @@ function ActionsContent({ brand }: { brand: Brand }) {
       .then(setMembers)
       .catch(() => setMembers([]));
   }, [load]);
+
+  // An assignee from the URL who is no longer on the team falls back to all.
+  useEffect(() => {
+    if (members.length === 0 || assignee === 'all' || assignee === 'unassigned') return;
+    if (!members.some((m) => m.userId === assignee)) setAssignee('all');
+  }, [members, assignee]);
 
   // Restore the drawer named by the URL once the list is in.
   useEffect(() => {
@@ -191,6 +243,36 @@ function ActionsContent({ brand }: { brand: Brand }) {
       }
     });
   }, [actions, focus, category, impact, status, assignee, search, sort, tTexts, t]);
+
+  const handleExportCsv = useCallback(() => {
+    if (visible.length === 0) return;
+
+    const rows = visible.map((action) => ({
+      number: action.actionNo,
+      title: actionTexts(action, tTexts).title,
+      category: tCategories(action.category),
+      impact: t(`impact.${action.impact}`),
+      status: t(`status.${action.status}`),
+      assignee: action.assignee?.fullName ?? '',
+      due_date: action.dueDate ?? '',
+      tasks_done_total: `${action.taskCompleted} / ${action.taskTotal}`,
+      signal_count: action.signalCount,
+      created: action.createdAt,
+    }));
+
+    const csv = toCsv(rows, ACTION_EXPORT_HEADERS);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const date = new Date().toISOString().slice(0, 10);
+    const slug = brand.slug ?? 'brand';
+
+    link.href = url;
+    link.download = `ansvisor_${slug}_actions_${date}.csv`;
+    link.click();
+
+    URL.revokeObjectURL(url);
+  }, [brand.slug, visible, tTexts, tCategories, t]);
 
   const categoryCounts = useMemo(() => {
     const counts = new Map<ActionCategory, number>();
@@ -403,6 +485,17 @@ function ActionsContent({ brand }: { brand: Brand }) {
             {t('filters.clear')}
           </Button>
         )}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="ml-auto gap-2 text-xs"
+          onClick={handleExportCsv}
+          disabled={visible.length === 0}
+        >
+          <Download className="h-3.5 w-3.5" />
+          {common('exportCsv')}
+        </Button>
       </div>
 
       {visible.length > 0 ? (

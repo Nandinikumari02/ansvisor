@@ -3,6 +3,7 @@ import { Link } from '@/i18n/navigation';
 import { createClient } from '@/lib/supabase/server';
 import { getBrands } from '@/lib/actions/brand';
 import { getPlan, isCloud as checkIsCloud } from '@/config/plans';
+import { getOrgPlan } from '@/lib/guards/plan-guard';
 import { BrandsClient } from './_brands-client';
 import { Button } from '@/components/ui/button';
 import { buttonVariants } from '@/components/ui/button-variants';
@@ -60,19 +61,14 @@ export default async function BrandsPage() {
 
   const orgId = profile?.organization_id;
 
-  const [brands, orgData] = await Promise.all([
+  // getOrgPlan, not getPlan(org.plan): the limit shown here must be the one
+  // createBrand enforces, Enterprise plan_overrides included. Reading the bare
+  // plan offered "Add brand" to an override-capped org and failed on submit.
+  const [brands, plan] = await Promise.all([
     orgId ? getBrands(orgId) : [],
-    orgId
-      ? supabase
-          .from('organizations')
-          .select('plan')
-          .eq('id', orgId)
-          .single()
-          .then((r) => r.data)
-      : null,
+    orgId ? getOrgPlan(orgId) : getPlan(null),
   ]);
 
-  const plan = getPlan(orgData?.plan as string | null);
   const maxBrands = plan.limits.maxBrands;
   const canAddBrand = maxBrands === -1 || brands.length < maxBrands;
   const needsUpgrade = !canAddBrand && checkIsCloud();

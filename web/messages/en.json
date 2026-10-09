@@ -204,6 +204,10 @@
       "ai_referral_traffic": {
         "name": "AI Referral Traffic",
         "description": "Visits arriving from AI platforms"
+      },
+      "competitor_lead": {
+        "name": "Lead over top competitor",
+        "description": "Your visibility minus the strongest competitor's on the same prompts, in points"
       }
     },
     "signalCategories": {
@@ -713,7 +717,20 @@
         "skipReason": "Why was this skipped?",
         "skipReasonPlaceholder": "e.g. handled elsewhere, no longer relevant",
         "skipConfirm": "Skip task",
-        "skipCancel": "Cancel"
+        "skipCancel": "Cancel",
+        "noSignalsOpportunity": "This action was sent from Content Optimization. Its evidence is the opportunity on the Overview tab, not detection signals.",
+        "opportunity": {
+          "title": "Content opportunity",
+          "open": "Open opportunity",
+          "brief": "Brief & outline",
+          "words": "~{count} words",
+          "noBrief": "No brief yet. <link>Generate one on the opportunity.</link>",
+          "prompts": "{count, plural, one {# prompt to answer} other {# prompts to answer}}",
+          "queries": "{count, plural, one {# search AI engines ran} other {# searches AI engines ran}}",
+          "allQueries": "Show all {count}",
+          "fewerQueries": "Show fewer",
+          "unavailable": "The opportunity this action was sent from is no longer available."
+        }
       }
     },
     "actionTexts": {
@@ -1102,6 +1119,12 @@
         "platforms": "{count, plural, one {# platform} other {# platforms}}",
         "regions": "{count, plural, one {# region} other {# regions}}",
         "competitors": "{count, plural, one {# competitor} other {# competitors}}"
+      },
+      "content_opportunity": {
+        "title": "Act on a content opportunity for {targets}",
+        "titleGeneric": "Act on a content opportunity",
+        "description": "Sent from Content Optimization: a piece of content, or work on an existing page, that answers a group of related prompts.",
+        "goal": "Get the brand into AI answers for these prompts with the content this opportunity calls for."
       }
     },
     "actionTasks": {
@@ -1432,6 +1455,7 @@
     "runAudit": "Run Audit",
     "running": "Auditing…",
     "recent": "Recent Audits",
+    "loadMore": "Load more",
     "retry": "Retry",
     "deleteAudit": "Delete audit",
     "loadFailed": "Couldn't load this audit",
@@ -1561,7 +1585,17 @@
     "positiveSentiment": "Positive Sentiment",
     "neutral": "Neutral",
     "negative": "Negative",
-    "sovByPlatform": "Share of Voice by Platform"
+    "sovByPlatform": "Share of Voice by Platform",
+    "resultDetail": {
+      "notFoundTitle": "Result not found",
+      "notFoundDescription": "This result may have been deleted or does not exist.",
+      "loadFailedTitle": "Couldn't load this result",
+      "loadFailedDescription": "Something went wrong while loading this result. Please try again.",
+      "goBack": "Go back",
+      "brandCitations": "Brand Citations",
+      "totalCitations": "Total Citations",
+      "checkedAt": "Checked: {date}"
+    }
   },
   "topics": {
     "addTopic": "Add Topic",
@@ -1615,6 +1649,17 @@
     "generating": "Analyzing...",
     "send": "Send",
     "sendToWorkflow": "Send to Workflow",
+    "generateBrief": "Generate Brief",
+    "generatingBrief": "Generating...",
+    "briefGenerated": "Brief Generated",
+    "briefLimitReached": "You've used this month's content briefs",
+    "sendToActions": "Send to Actions",
+    "openInActions": "Open in Actions",
+    "sendAgain": "Send Again",
+    "copyAllData": "Copy All Data",
+    "copiedToast": "Copied to clipboard",
+    "copyError": "Could not copy to the clipboard",
+    "moreActions": "More actions",
     "sending": "Sending...",
     "noResults": "No opportunities match your filters.",
     "clearFilters": "Clear filters",
@@ -1624,6 +1669,7 @@
     "undoFailed": "Failed to undo",
     "cancel": "Cancel",
     "viewDetails": "View Details",
+    "openInNewTab": "Open in new tab",
     "configureWebhook": "Configure Webhook",
     "noOpportunities": "No content opportunities yet",
     "noOpportunitiesHint": "Generate opportunities to get AI-powered content recommendations based on your prompt data.",
@@ -1634,7 +1680,9 @@
       "sent": "Sent to Workflow",
       "in_progress": "In Progress",
       "done": "Done",
-      "dismissed": "Dismissed"
+      "dismissed": "Dismissed",
+      "archived": "Archived",
+      "reviewed": "Reviewed"
     },
     "impact": {
       "high": "High",
@@ -1645,6 +1693,10 @@
       "owned": "Owned",
       "earned": "Earned"
     },
+    "typeHint": {
+      "owned": "Content on your own site",
+      "earned": "Coverage on other sites: articles, reviews, links"
+    },
     "kpi": {
       "total": "Total Opportunities",
       "highImpact": "High Impact",
@@ -1653,12 +1705,19 @@
       "shown": "{count} shown",
       "opportunities": "opportunities",
       "outOf100": "out of 100",
-      "sentOrInProgress": "sent or in progress"
+      "sentOrInProgress": "sent or in progress",
+      "fromSignals": "from {count, plural, one {# signal} other {# signals}} analyzed"
     },
     "filters": {
       "allStatuses": "All Statuses",
       "allImpacts": "All Impacts",
-      "allTypes": "All Types"
+      "allTypes": "All Types",
+      "allTopics": "All Topics"
+    },
+    "sort": {
+      "label": "Sort",
+      "score": "Highest score",
+      "newest": "Newest"
     },
     "bulk": {
       "selected": "{count} selected",
@@ -1693,7 +1752,29 @@
       "webhookStatus": "Webhook Status",
       "notSentYet": "Not sent to any workflow yet.",
       "sentAt": "Sent at {date}",
-      "webhookResponse": "Webhook Response"
+      "webhookResponse": "Webhook Response",
+      "topCompetitor": "Strongest Competitor",
+      "basketTitle": "Opportunity Basket",
+      "basketSummary": "{prompts, plural, one {# prompt} other {# prompts}} · {included} searches included · {excluded} excluded",
+      "basketIncluded": "Searches AI engines ran for these prompts",
+      "basketShowExcluded": "Show {count} excluded searches",
+      "basketHideExcluded": "Hide excluded searches",
+      "scoreTitle": "Why This Score",
+      "scoreWeight": "{weight}% of score",
+      "scoreWindow": "Measured over the last {days} days.",
+      "score": {
+        "demand": "Demand",
+        "visibilityGap": "Visibility gap",
+        "competitorGap": "Competitor gap",
+        "intent": "Intent"
+      },
+      "targetTitle": "Your Site",
+      "targetStats": "{citations, plural, one {# AI citation} other {# AI citations}} · {sessions, plural, one {# session} other {# sessions}} in the last 30 days",
+      "assetsTitle": "Recommended Assets",
+      "primaryAsset": "Primary",
+      "resultsTitle": "Results",
+      "resultsPending": "Completed. Measured from {date}, once a full window has passed.",
+      "resultsUnavailable": "The actions sent from this opportunity are no longer available."
     },
     "webhook": {
       "title": "Webhook Settings",
@@ -1718,6 +1799,7 @@
       "saveError": "Failed to save webhook config"
     },
     "loadError": "Failed to load content opportunities",
+    "exportError": "Failed to export opportunities",
     "loadOpportunityError": "Failed to load opportunity",
     "generatedToast": "Generated {count} opportunities",
     "generationFailed": "Generation failed — please try again",
@@ -1735,7 +1817,49 @@
     "bulkDismissError": "Bulk dismiss failed",
     "bulkDeleteError": "Bulk delete failed",
     "briefGeneratedToast": "Content brief generated!",
-    "briefGenerateError": "Failed to generate brief"
+    "briefGenerateError": "Failed to generate brief",
+    "restore": "Restore",
+    "restoredToast": "Restored to New",
+    "restoreError": "Failed to restore the opportunity",
+    "decision": {
+      "create": "Create",
+      "optimize": "Optimize",
+      "expand": "Expand",
+      "refresh": "Refresh",
+      "consolidate": "Consolidate",
+      "defend": "Defend"
+    },
+    "decisionHint": {
+      "create": "No page on your site answers this yet. Write a new one.",
+      "optimize": "A page on your site already targets this. Make it the answer AI engines pick.",
+      "expand": "A page on your site covers part of this. Add the angles it misses.",
+      "refresh": "A page on your site covers this but is out of date. Update it.",
+      "consolidate": "Several pages on your site target this and split its signals. Merge them into one.",
+      "defend": "You are already visible here. Keep this page ahead of competitors."
+    },
+    "assetType": {
+      "blog_post": "Blog post",
+      "pillar_guide": "Pillar guide",
+      "landing_page": "Landing page",
+      "comparison_page": "Comparison page",
+      "glossary_page": "Glossary page",
+      "faq_page": "FAQ page",
+      "product_page": "Product page",
+      "category_page": "Category page",
+      "third_party_article": "Third-party article",
+      "backlink": "Backlink"
+    },
+    "sendToActionCenter": "Send to Action Center",
+    "sendAsset": "Send",
+    "openInActionCenter": "Open in Action Center",
+    "sentToActionCenter": "Sent to the Action Center",
+    "alreadyInActionCenter": "Already in the Action Center",
+    "sendToActionCenterError": "Failed to send to the Action Center",
+    "markReviewed": "Mark as reviewed",
+    "reviewedError": "Failed to mark as reviewed",
+    "newSignal": "New signal detected",
+    "newSignalScoreRose": "Completed earlier, and its opportunity has grown since: the score rose from {from} to {to}.",
+    "newSignalGainLost": "Completed earlier, but the gain did not hold: visibility on these prompts was {after}% after the work and is {now}% now."
   },
   "traffic": {
     "title": "AI Traffic Analytics",
@@ -1743,7 +1867,25 @@
     "totalCrawls": "Total Crawls",
     "uniqueBots": "Unique Bots",
     "referralTraffic": "AI Referral Traffic",
-    "topPages": "Top Crawled Pages"
+    "topPages": "Top Crawled Pages",
+    "searchPlaceholder": "Search by URL or path...",
+    "allPlatforms": "All platforms",
+    "clearFilters": "Clear filters",
+    "noMatchingVisitsTitle": "No matching visits",
+    "noMatchingVisitsDescription": "Try adjusting your filters or search terms.",
+    "noVisitsTitle": "No visits yet",
+    "noVisitsDescription": "Once visitors arrive from AI platforms, their visits will appear here.",
+    "noTrafficInPeriodTitle": "No traffic in this period",
+    "noTrafficInPeriodDescription": "No AI-referred visits in the {range}. There is traffic data in other time periods.",
+    "showAllData": "Show all data",
+    "noBrandTitle": "No brand selected",
+    "noBrandDescription": "Select a brand to view AI traffic analytics.",
+    "noDataTitle": "No traffic data yet",
+    "noDataDescriptionNoSnippet": "Add the tracking snippet to your website to start collecting AI-referred traffic data.",
+    "snippetTitle": "Add this snippet to your website",
+    "snippetDescription": "Paste this before the closing <code>{tag}</code> tag to track AI-referred visits.",
+    "copySnippet": "Copy tracking script",
+    "exportError": "Failed to export CSV"
   },
   "prompts": {
     "title": "Prompt Volumes",
@@ -1751,7 +1893,16 @@
     "totalVolume": "Total Volume",
     "trending": "Trending",
     "presenceRate": "Presence Rate",
-    "gaps": "Content Gaps"
+    "gaps": "Content Gaps",
+    "suggestions": {
+      "measuredSuggestionsKept": "Search Console and Analytics suggestions were kept — dismiss them individually to hide them for 30 days.",
+      "include": "Include this prompt",
+      "topic": "Topic",
+      "selectTopic": "Select a topic",
+      "platformsAndModels": "Platform & Models",
+      "selectPlatformsAndModels": "Select platform & models",
+      "selectedCount": "{count} selected"
+    }
   },
   "competitors": {
     "title": "Competitors",
@@ -1766,6 +1917,7 @@
     "citations": "Citations",
     "trackedCompetitors": "Tracked Competitors",
     "selectToCompare": "Select a competitor to see head-to-head comparison.",
+    "windowLast30Days": "Scores cover the last 30 days.",
     "selected": "Selected",
     "noData": "No data",
     "emptyTitle": "No competitors yet",
@@ -2001,6 +2153,7 @@
     "queryFanout": "Query Fan-out",
     "queryFanoutDescription": "Sub-queries answer engines actually ran while answering your tracked prompts.",
     "fanoutCoverage": "{queries} distinct sub-queries across {answers} answers",
+    "loadReportFailed": "Couldn't load this report.",
     "notFound": "Report not found.",
     "backToReports": "Back to Reports",
     "generatedOn": "Generated on",
@@ -2046,6 +2199,7 @@
     "pulseRecipients": "Recipients",
     "pulseRecipientsPlaceholder": "alex@example.com, sam@example.com",
     "pulseRecipientsHint": "Comma-separated email addresses. Leave empty to send to every organization member.",
+    "pulseRecipientsInvalid": "Not a valid email address: {emails}. Fix or remove it before saving.",
     "pulseSaved": "Notification settings saved",
     "pulseSaveFailed": "Could not save notification settings. Please try again.",
     "pulseLoadFailed": "Could not load notification settings.",
@@ -2105,7 +2259,7 @@
     "remove": "Remove",
     "apiKeys_description": "Long-lived tokens for the Ansvisor MCP server and other external clients. Keys are shown once at creation — store them somewhere safe.",
     "apiKeys_mcpEndpoint": "MCP endpoint",
-    "apiKeys_mcpEndpointHint": "Paste this URL + a key below into Claude Desktop / Claude Code / Cursor. See the <link>MCP guide</link>.",
+    "apiKeys_mcpEndpointHint": "Create a key to get a ready-to-paste setup for Claude, Codex, Cursor and other MCP clients. See the <link>MCP guide</link>.",
     "apiKeys_noKeys": "No API keys yet. Create one to connect the MCP server.",
     "apiKeys_revoked": "revoked",
     "apiKeys_created": "Created {date} · Last used {lastUsed}",
@@ -2117,6 +2271,21 @@
     "apiKeys_copyTitle": "Copy your API key",
     "apiKeys_copyDescription": "You won't be able to see this again. Store it somewhere safe.",
     "apiKeys_done": "Done",
+    "apiKeys_connectTitle": "Connect a client",
+    "apiKeys_copySnippet": "Copy setup",
+    "apiKeys_connectHint": "The setup includes this key, so copy it now. The <link>MCP guide</link> shows how to keep the key in an environment variable instead.",
+    "apiKeysConnectWhere": {
+      "claude-code": "Run in your terminal.",
+      "claude-desktop": "In Claude, open Settings → Connectors → Add custom connector and fill in these fields.",
+      "codex": "Add to ~/.codex/config.toml.",
+      "cursor": "Add to ~/.cursor/mcp.json, merging into any existing mcpServers.",
+      "vscode": "Add to .vscode/mcp.json, or run \"MCP: Open User Configuration\" for every workspace.",
+      "windsurf": "In the Cascade panel, open … → Open MCP config file and merge this in.",
+      "gemini-cli": "Run in your terminal.",
+      "hermes": "Add to ~/.hermes/config.yaml.",
+      "openclaw": "Add to ~/.openclaw/openclaw.json, merging into any existing mcp.servers.",
+      "zed": "Add to your Zed settings.json."
+    },
     "apiKeys_name": "Name",
     "agent_description": "Bring your own Anthropic API key. The in-product agent uses your key to call Claude directly — usage is billed to your Anthropic account, not to Ansvisor.",
     "agent_keyConfigured": "Key configured",
@@ -2144,6 +2313,53 @@
     "integrations_disconnectDescription": "The stored connection is removed for the whole organization. You can reconnect at any time.",
     "removeMember": "Remove team member",
     "invitationActions": "Invitation actions",
+    "team_description": "Manage team members and their access.",
+    "team_seatsUsedUnlimited": "{count, plural, one {# seat} other {# seats}} used",
+    "team_seatsUsed": "{used} of {max} seats used",
+    "team_seatLimitTitle": "Seat limit reached",
+    "team_seatLimitDescription": "Your {plan} plan includes {count, plural, one {# seat} other {# seats}}. Upgrade to invite more teammates.",
+    "team_upgrade": "Upgrade",
+    "team_pendingInvitations": "Pending invitations",
+    "team_pendingInvitationsDescription": "Invitations that haven't been accepted yet.",
+    "team_role_admin": "Admin",
+    "team_role_manager": "Manager",
+    "team_role_analyst": "Analyst",
+    "team_role_agency_partner": "Agency Partner",
+    "team_you": "You",
+    "team_loadFailed": "Failed to load team",
+    "team_roleUpdated": "Role updated",
+    "team_roleUpdateFailed": "Failed to update role",
+    "team_memberRemoved": "Member removed",
+    "team_memberRemoveFailed": "Failed to remove member",
+    "team_removeDialogTitle": "Remove team member?",
+    "team_removeDialogDescription": "{name} will lose access to this organization. This cannot be undone.",
+    "team_cancel": "Cancel",
+    "team_removing": "Removing...",
+    "team_removeMemberConfirm": "Remove member",
+    "team_invitationRevoked": "Invitation revoked",
+    "team_invitationRevokeFailed": "Failed to revoke invitation",
+    "team_invitationResent": "Invitation resent (link copied)",
+    "team_invitationResendFailed": "Failed to resend invitation",
+    "team_expired": "Expired",
+    "team_expires": "Expires {date}",
+    "team_resendInvite": "Resend invite",
+    "team_revoke": "Revoke",
+    "team_emailRequired": "Email is required",
+    "team_invitationSent": "Invitation sent",
+    "team_inviteCreated": "Invite created — share the link",
+    "team_invitationSendFailed": "Failed to send invitation",
+    "team_linkCopied": "Link copied",
+    "team_inviteMember": "Invite member",
+    "team_inviteDialogTitle": "Invite a team member",
+    "team_inviteDialogDescription": "They'll receive an email with a link to join your organization.",
+    "team_inviteLinkEmailSent": "Invitation sent. You can also share this link directly:",
+    "team_inviteLinkNoEmail": "No email was sent — this address may already have an account. Share this link with them directly:",
+    "team_email": "Email",
+    "team_emailPlaceholder": "teammate@company.com",
+    "team_role": "Role",
+    "team_done": "Done",
+    "team_sending": "Sending...",
+    "team_sendInvitation": "Send invitation",
     "organization": "Organization",
     "org_title": "Organization",
     "org_description": "Manage your organization name and view plan details.",
@@ -2208,6 +2424,10 @@
       "dangerTab": "Danger Zone",
       "saveChanges": "Save Changes",
       "saved": "Brand updated!",
+      "region": "Region",
+      "stateOptional": "State (optional)",
+      "nationwide": "Nationwide (no state)",
+      "stateHint": "Localizes AI answers to this state from the next tracking run onward.",
       "deleteWarning": "This action cannot be undone. All data for this brand (insights, content, competitors) will be permanently deleted.",
       "confirmDelete": "Type the brand name to confirm:",
       "deleteConfirmPlaceholder": "Brand name",

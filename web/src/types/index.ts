@@ -174,11 +174,26 @@ export interface PromptVolume {
   fetchedAt: string;
 }
 
-export type ContentOpportunityStatus = 'new' | 'sent' | 'in_progress' | 'done' | 'dismissed';
+export type ContentOpportunityStatus =
+  | 'new'
+  | 'reviewed'
+  | 'sent'
+  | 'in_progress'
+  | 'done'
+  | 'dismissed'
+  | 'archived';
 
 export type ContentOpportunityImpact = 'high' | 'medium' | 'low';
 
 export type ContentOpportunityType = 'owned' | 'earned';
+
+export type ContentOpportunityDecision =
+  | 'create'
+  | 'optimize'
+  | 'expand'
+  | 'refresh'
+  | 'consolidate'
+  | 'defend';
 
 export interface ContentOpportunitySourceData {
   promptText?: string;
@@ -188,6 +203,79 @@ export interface ContentOpportunitySourceData {
   intent?: string;
   keywords?: string[];
   competitorsCited?: string[];
+  // Cluster opportunities (#857).
+  clusterLabel?: string;
+  topicName?: string | null;
+  relatedTopics?: (string | null)[];
+  prompts?: string[];
+  topCompetitorVisibility?: number;
+  queries?: {
+    included: number;
+    excluded: number;
+    top: { query: string; timesSearched: number }[];
+  };
+  scoreComponents?: {
+    demand: number;
+    visibilityGap: number;
+    competitorGap: number;
+    intent: number;
+  };
+  windowDays?: number;
+  targetPages?: OpportunityPage[];
+  assets?: OpportunityAsset[];
+  /** Action Center actions sent from this opportunity, by asset key ('all' for the whole). */
+  actions?: Record<string, string>;
+  /** Actions from before the opportunity was re-opened. */
+  pastActions?: string[];
+  /** Why a finished opportunity went back to New (#857, Phase 4). */
+  reopened?: {
+    at: string;
+    reason: 'score_rose' | 'gain_lost';
+    previousScore: number;
+    score: number;
+    visibilityAfter: number | null;
+    visibility: number;
+  };
+}
+
+export interface OpportunityPage {
+  url: string;
+  title: string | null;
+  aiCitations: number;
+  gaSessions: number;
+  lastmod: string | null;
+}
+
+export type OpportunityAssetType =
+  | 'blog_post'
+  | 'pillar_guide'
+  | 'landing_page'
+  | 'comparison_page'
+  | 'glossary_page'
+  | 'faq_page'
+  | 'product_page'
+  | 'category_page'
+  | 'third_party_article'
+  | 'backlink';
+
+export interface OpportunityAsset {
+  key: string;
+  type: OpportunityAssetType;
+  channel: ContentOpportunityType;
+  decision: ContentOpportunityDecision;
+  title: string;
+  pages: OpportunityPage[];
+}
+
+export interface OpportunityBasket {
+  clusters: {
+    id: string;
+    label: string;
+    need: string;
+    topicName: string | null;
+    prompts: { id: string; text: string }[];
+  }[];
+  queries: { query: string; timesSearched: number; included: boolean; reason: string }[];
 }
 
 export interface ContentBrief {
@@ -204,6 +292,8 @@ export interface ContentOpportunity {
   id: string;
   brandId: string;
   promptId?: string;
+  clusterId?: string | null;
+  decision?: ContentOpportunityDecision | null;
   title: string;
   description?: string;
   type: ContentOpportunityType;
