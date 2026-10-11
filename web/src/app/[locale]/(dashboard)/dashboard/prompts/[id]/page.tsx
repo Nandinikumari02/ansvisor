@@ -41,7 +41,6 @@ import { cn } from '@/lib/utils';
 import { formatRegionDisplay } from '@/lib/region';
 import { toast } from 'sonner';
 import { useUserRole } from '@/hooks/use-user-role';
-import { useBrandStore } from '@/stores/use-brand-store';
 import { getOpportunities } from '@/lib/actions/content';
 import type { ContentOpportunity } from '@/types';
 import { AIProviderAvatar, resolveAIProvider } from '@/components/ai-provider-avatar';
@@ -53,7 +52,12 @@ import {
   type PromptTargetUrl,
   type PromptWorkStatus,
 } from '@/lib/actions/prompt-workflow';
-import { NotesCard, TargetUrlsCard, ContentOpportunitiesCard } from './_workflow-cards';
+import {
+  NotesCard,
+  TargetUrlsCard,
+  ContentOpportunitiesCard,
+  OPPORTUNITY_PREVIEW_LIMIT,
+} from './_workflow-cards';
 import { ResponseDetail } from '@/components/results/response-detail';
 import {
   CategoryBadge,
@@ -635,12 +639,13 @@ export default function PromptDetailPage() {
   const promptId = params.id as string;
 
   const { canManage } = useUserRole();
-  const activeBrandId = useBrandStore((s) => s.activeBrandId);
+  const [data, setData] = useState<PromptDetailData | null>(null);
+  const promptBrandId = data?.prompt.brandId;
   const [opportunities, setOpportunities] = useState<ContentOpportunity[]>([]);
   const [opportunitiesTotal, setOpportunitiesTotal] = useState(0);
   const [opportunitiesLoading, setOpportunitiesLoading] = useState(true);
+  const [opportunitiesFailed, setOpportunitiesFailed] = useState(false);
 
-  const [data, setData] = useState<PromptDetailData | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -671,29 +676,39 @@ export default function PromptDetailPage() {
 
   useEffect(() => {
     let cancelled = false;
-    if (activeBrandId) {
-      setOpportunitiesLoading(true);
-      getOpportunities(activeBrandId, { promptId, status: 'new', limit: 5 })
-        .then((res) => {
-          if (cancelled) return;
-          setOpportunities(res.opportunities);
-          setOpportunitiesTotal(res.total);
-        })
-        .catch((err) => {
-          console.error('Failed to load opportunities:', err);
-          if (cancelled) return;
-          toast.error('Failed to load content opportunities');
-        })
-        .finally(() => {
-          if (!cancelled) setOpportunitiesLoading(false);
-        });
-    } else {
-      setOpportunitiesLoading(false);
-    }
+    if (!promptBrandId) return;
+
+    setOpportunities([]);
+    setOpportunitiesTotal(0);
+    setOpportunitiesFailed(false);
+    setOpportunitiesLoading(true);
+
+    getOpportunities(promptBrandId, {
+      promptId,
+      status: 'new',
+      limit: OPPORTUNITY_PREVIEW_LIMIT,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        setOpportunities(res.opportunities);
+        setOpportunitiesTotal(res.total);
+      })
+      .catch((err) => {
+        console.error('Failed to load opportunities:', err);
+        if (cancelled) return;
+        setOpportunities([]);
+        setOpportunitiesTotal(0);
+        setOpportunitiesFailed(true);
+        toast.error('Failed to load content opportunities');
+      })
+      .finally(() => {
+        if (!cancelled) setOpportunitiesLoading(false);
+      });
+
     return () => {
       cancelled = true;
     };
-  }, [activeBrandId, promptId]);
+  }, [promptBrandId, promptId]);
 
   const handleStatusChange = (status: PromptWorkStatus | null) => {
     const previous = workStatus;
@@ -975,6 +990,7 @@ export default function PromptDetailPage() {
           opportunities={opportunities}
           total={opportunitiesTotal}
           loading={opportunitiesLoading}
+          failed={opportunitiesFailed}
         />
       </div>
     </div>

@@ -1,14 +1,17 @@
 'use client';
 
 /**
- * Prompt workflow section on the prompt detail page: a notes thread and the
- * target URLs list. The work-status picker lives in the page header (next to
- * the Active badge); these two cards carry the collaboration surface.
+ * Prompt workflow section on the prompt detail page: a notes thread, the
+ * target URLs list, and content opportunities. The work-status picker lives in
+ * the page header (next to the Active badge); these three cards carry the
+ * collaboration surface.
  */
 
+import { useTranslations } from 'next-intl';
 import { Link } from '@/i18n/navigation';
 import type { ContentOpportunity } from '@/types';
 import { useCallback, useState } from 'react';
+import { IMPACT_COLORS } from '@/components/content/opportunity-detail';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -350,17 +353,23 @@ export function TargetUrlsCard({
   );
 }
 
+export const OPPORTUNITY_PREVIEW_LIMIT = 5;
+
 export function ContentOpportunitiesCard({
   promptId,
   opportunities,
   total,
   loading,
+  failed,
 }: {
   promptId: string;
   opportunities: ContentOpportunity[];
   total: number;
   loading: boolean;
+  failed?: boolean;
 }) {
+  const t = useTranslations('content');
+
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -382,6 +391,10 @@ export function ContentOpportunitiesCard({
           <div className="flex justify-center py-4">
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
           </div>
+        ) : failed ? (
+          <p className="py-4 text-center text-xs text-muted-foreground">
+            Content opportunities couldn&apos;t be loaded.
+          </p>
         ) : opportunities.length === 0 ? (
           <p className="py-4 text-center text-xs text-muted-foreground">
             No open opportunities for this prompt.
@@ -389,23 +402,28 @@ export function ContentOpportunitiesCard({
         ) : (
           <div className="space-y-3">
             <ul className="space-y-1.5">
-              {opportunities.slice(0, 5).map((opp) => (
+              {opportunities.map((opp) => (
                 <li
                   key={opp.id}
-                  className="group flex flex-col gap-1.5 rounded-lg border bg-muted/20 px-3 py-2"
+                  className="flex flex-col gap-1.5 rounded-lg border bg-muted/20 px-3 py-2"
                 >
                   <Link
                     href={`/dashboard/content/${opp.id}`}
-                    className="text-sm font-medium hover:underline flex items-center justify-between gap-4"
+                    title={opp.title}
+                    className="block truncate text-sm font-medium hover:underline"
                   >
-                    <span className="truncate">{opp.title}</span>
+                    {opp.title}
                   </Link>
                   <div className="flex items-center gap-2">
-                    <Badge variant="outline" className="text-[10px] uppercase">
-                      {opp.impact}
+                    <Badge variant="outline" className={cn('text-xs', IMPACT_COLORS[opp.impact])}>
+                      {t(`impact.${opp.impact}` as 'impact.high' | 'impact.medium' | 'impact.low')}
                     </Badge>
-                    <Badge variant="outline" className="text-[10px] uppercase">
-                      {opp.type}
+                    <Badge
+                      variant="outline"
+                      className="text-xs"
+                      title={t(`typeHint.${opp.type}` as 'typeHint.owned' | 'typeHint.earned')}
+                    >
+                      {t(`type.${opp.type}` as 'type.owned' | 'type.earned')}
                     </Badge>
                     {opp.brief && (
                       <Badge
@@ -420,10 +438,10 @@ export function ContentOpportunitiesCard({
                 </li>
               ))}
             </ul>
-            {total > 5 && (
+            {total > OPPORTUNITY_PREVIEW_LIMIT && (
               <div className="flex justify-center pt-2">
                 <Link
-                  href={`/dashboard/content?prompt=${promptId}`}
+                  href={`/dashboard/content?prompt=${encodeURIComponent(promptId)}&status=new`}
                   className="text-xs text-muted-foreground hover:text-foreground hover:underline"
                 >
                   View all {total}
