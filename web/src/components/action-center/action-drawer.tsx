@@ -61,6 +61,7 @@ import { ActionIcon } from './action-table';
 import { OpportunityContext } from './opportunity-context';
 import { ImproveContext } from './improve-context';
 import { TopicGapContext } from './topic-gap-context';
+import { TopicOpportunityContext } from './topic-opportunity-context';
 import { cn } from '@/lib/utils';
 
 type DrawerTab = 'overview' | 'tasks' | 'signals' | 'history';
@@ -253,6 +254,8 @@ export function ActionDrawer({
                 <ImproveContext payload={action.payload ?? {}} />
               ) : action.kind === 'topic_competitor_gap' ? (
                 <TopicGapContext payload={action.payload ?? {}} />
+              ) : action.kind === 'topic_opportunity' ? (
+                <TopicOpportunityContext payload={action.payload ?? {}} />
               ) : opportunityId ? (
                 <OpportunityContext
                   opportunityId={opportunityId}
@@ -332,9 +335,11 @@ export function ActionDrawer({
                     ? t('drawer.noSignalsImprove')
                     : action.kind === 'topic_competitor_gap'
                       ? t('drawer.noSignalsTopicGap')
-                      : opportunityId
-                        ? t('drawer.noSignalsOpportunity')
-                        : t('drawer.noSignals')}
+                      : action.kind === 'topic_opportunity'
+                        ? t('drawer.noSignalsTopicOpportunity')
+                        : opportunityId
+                          ? t('drawer.noSignalsOpportunity')
+                          : t('drawer.noSignals')}
                 </p>
               )}
               {detail.signals.map((signal) => {
