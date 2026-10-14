@@ -14,14 +14,6 @@ const VisibilityRateTrendChart = dynamic(
   },
 );
 
-const CompetitorLeaderboard = dynamic(
-  () => import('./_charts').then((m) => m.CompetitorLeaderboard),
-  {
-    ssr: false,
-    loading: () => <Skeleton className="h-64 w-full" />,
-  },
-);
-
 import { MetricBreakdownSheet } from './_metric-breakdown-sheet';
 import { FormulaDialog } from './_formula-dialog';
 import { useBrandStore } from '@/stores/use-brand-store';
@@ -95,6 +87,7 @@ import type { PlatformChange, PlatformTableRow } from '@/lib/insights-summary';
 import { KpiRows } from './_kpi-cards';
 import { SummaryLine } from './_summary-line';
 import { PlatformTable } from './_platform-table';
+import { Leaderboard } from './_leaderboard';
 
 // ─── Filter Types ─────────────────────────────────────────────────────────────
 
@@ -1472,23 +1465,12 @@ export default function InsightsPage() {
                     </CardContent>
                   </Card>
 
-                  <Card className="lg:col-span-2">
-                    <CardHeader className="pb-2">
-                      <div className="flex items-center justify-between gap-3">
-                        <CardTitle className="text-sm font-medium">Leaderboard</CardTitle>
-                        <Link
-                          href="/dashboard/competitors"
-                          className="flex shrink-0 items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-                        >
-                          Head-to-Head Comparison
-                          <ArrowRight className="h-3 w-3" />
-                        </Link>
-                      </div>
-                    </CardHeader>
-                    <CardContent>
-                      <CompetitorLeaderboard data={competitorData.brands} />
-                    </CardContent>
-                  </Card>
+                  <Leaderboard
+                    className="lg:col-span-2"
+                    brands={competitorData.brands}
+                    providerRows={competitorData.providerRows}
+                    platforms={platforms}
+                  />
                 </div>
               ) : (
                 <NoCompetitorsTeaser />
