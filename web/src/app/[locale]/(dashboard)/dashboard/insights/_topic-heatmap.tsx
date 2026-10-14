@@ -15,15 +15,16 @@ const VISIBLE_ROWS = 6;
 const gapText = (gap: number) => `−${Math.abs(gap).toFixed(1)}`;
 
 /**
- * Cell shades, light to dark, as theme-relative tints so they read in both
- * themes; the darkest two flip the text color.
+ * Cell shades, light to dark: soft theme-relative tints, so they read in
+ * both themes and a full table doesn't turn into dark blocks. The text keeps
+ * its color on every shade.
  */
 const SHADES = [
-  'bg-muted/60 text-muted-foreground',
-  'bg-foreground/10 text-foreground',
-  'bg-foreground/20 text-foreground',
-  'bg-foreground/40 text-foreground',
-  'bg-foreground/75 text-background',
+  'bg-muted/40 text-muted-foreground',
+  'bg-foreground/[0.06] text-foreground',
+  'bg-foreground/[0.12] text-foreground',
+  'bg-foreground/[0.2] text-foreground',
+  'bg-foreground/[0.32] text-foreground',
 ] as const;
 
 /**
@@ -52,6 +53,9 @@ export function TopicHeatmap({
     columns.map((c) => c.key),
   );
   const shown = expanded ? rows : rows.slice(0, VISIBLE_ROWS);
+  // The tones spread over the scores of every row, so folding doesn't shift them.
+  const named = rows.flatMap((r) => r.scores).filter((v) => v > 0);
+  const [low, high] = [Math.min(...named), Math.max(...named)];
 
   return (
     <Card className={className}>
@@ -91,7 +95,7 @@ export function TopicHeatmap({
                       title={t('openTopic', { topic: row.name })}
                       className={cn(
                         'block rounded-md px-1 py-1.5 text-center font-semibold tabular-nums transition-opacity hover:opacity-80',
-                        SHADES[heatShade(value)],
+                        SHADES[heatShade(value, low, high)],
                         // Too few answers to read much into: shown, but faded.
                         row.status === 'lowSample' && 'opacity-50',
                       )}

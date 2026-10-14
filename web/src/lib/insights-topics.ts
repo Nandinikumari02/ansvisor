@@ -119,11 +119,15 @@ export function topicHeatmap(topics: TopicCompetitors[], columns: string[]): Hea
   );
 }
 
-/** A cell's shade, light to dark, by score (the mockup's 15/25/35/45 steps). */
-export function heatShade(score: number): 0 | 1 | 2 | 3 | 4 {
-  if (score >= 45) return 4;
-  if (score >= 35) return 3;
-  if (score >= 25) return 2;
-  if (score >= 15) return 1;
-  return 0;
+/**
+ * A cell's shade, light to dark, by where its score sits between the lowest
+ * and highest non-zero score in view. The map compares, so its tones spread
+ * over the scores shown whatever their level (a table of 50s and 70s still
+ * reads in steps); a score of 0, never named, stays the lightest.
+ */
+export function heatShade(score: number, min: number, max: number): 0 | 1 | 2 | 3 | 4 {
+  if (score <= 0) return 0;
+  if (max <= min) return 2;
+  const position = (score - min) / (max - min);
+  return (1 + Math.min(3, Math.floor(position * 4))) as 1 | 2 | 3 | 4;
 }

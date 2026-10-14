@@ -78,8 +78,15 @@ describe('topicHeatmap', () => {
 });
 
 describe('heatShade', () => {
-  it('darkens at the mockup’s steps', () => {
-    expect([0, 14.9, 15, 25, 35, 45, 90].map(heatShade)).toEqual([0, 0, 1, 2, 3, 4, 4]);
+  it('spreads the tones over the scores in view', () => {
+    // Quarters of the range: 50–57.5, 57.5–65, 65–72.5, 72.5–80.
+    expect([50, 56, 62, 70, 80].map((v) => heatShade(v, 50, 80))).toEqual([1, 1, 2, 3, 4]);
+    expect([12, 48.6].map((v) => heatShade(v, 12, 48.6))).toEqual([1, 4]);
+  });
+
+  it('keeps a score of 0 the lightest, and one score the middle', () => {
+    expect(heatShade(0, 50, 80)).toBe(0);
+    expect(heatShade(60, 60, 60)).toBe(2);
   });
 });
 
