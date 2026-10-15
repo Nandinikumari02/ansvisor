@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Link, useRouter } from '@/i18n/navigation';
 import { useSearchParams } from 'next/navigation';
-import { useTranslations } from 'next-intl';
+import { useLocale, useTranslations } from 'next-intl';
 import { Skeleton } from '@/components/ui/skeleton';
 import { MetricBreakdownSheet, type BreakdownTab } from './_metric-breakdown-sheet';
 import { FormulaDialog } from './_formula-dialog';
@@ -698,6 +698,7 @@ export default function InsightsPage() {
   const tCommon = useTranslations('common');
   const router = useRouter();
   const { isCloud } = usePlanContext();
+  const locale = useLocale();
   const brand = useBrandStore((s) => s.getActiveBrand());
   const [summary, setSummary] = useState<InsightsSummary | null>(null);
   const [trackedPrompts, setTrackedPrompts] = useState<TrackedPromptsKpi | null>(null);
@@ -1191,8 +1192,8 @@ export default function InsightsPage() {
   const trendRangeLabel =
     filters.datePreset === 'custom'
       ? t('trend.range.custom', {
-          from: formatWindowBound(filters.dateFrom),
-          to: formatWindowBound(filters.dateTo),
+          from: formatWindowBound(filters.dateFrom, locale),
+          to: formatWindowBound(filters.dateTo, locale),
         })
       : t(`trend.range.${filters.datePreset}`);
 
@@ -1301,6 +1302,7 @@ export default function InsightsPage() {
                 competitors={competitorData}
                 comparison={comparison}
                 platformChanges={platformChanges}
+                answers={summary?.totalResults}
               />
 
               {/* KPI cards (VIS-003): today's five, then the new rates. */}
@@ -1329,6 +1331,7 @@ export default function InsightsPage() {
                     data={rateTrend}
                     markers={trendMarkers}
                     rangeLabel={trendRangeLabel}
+                    answers={summary?.totalResults}
                     onPinnedChange={(pinned) =>
                       setRateTrend((current) => current && { ...current, pinned })
                     }
@@ -1339,6 +1342,7 @@ export default function InsightsPage() {
                     brands={competitorData.brands}
                     providerRows={competitorData.providerRows}
                     platforms={platforms}
+                    answers={summary?.totalResults}
                   />
                 </div>
               ) : (

@@ -1,9 +1,10 @@
 'use client';
 
 import { Fragment, useEffect, useState } from 'react';
-import { useTranslations } from 'next-intl';
+import { useLocale, useTranslations } from 'next-intl';
 import { formatRelative } from '@/lib/format-relative';
 import { timeUntil } from '@/lib/tracking-schedule';
+import { numberFormat } from '@/lib/number-format';
 
 /**
  * The header's "Acme Coffee · Last run 11h ago · next run in 13h" (VIS-012).
@@ -26,6 +27,7 @@ export function RunLine({
 }) {
   const t = useTranslations('insights.header');
   const tCommon = useTranslations('common');
+  const f = numberFormat(useLocale());
   const [, setTick] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setTick((n) => n + 1), 60_000);
@@ -41,7 +43,7 @@ export function RunLine({
       : hasData
         ? null
         : t('noRuns'),
-    nextIn ? t('nextRun', { when: t(nextIn.unit, { n: nextIn.value }) }) : null,
+    nextIn ? t('nextRun', { when: t(nextIn.unit, { n: f.number(nextIn.value) }) }) : null,
   ].filter((part): part is string => part !== null);
 
   return (
