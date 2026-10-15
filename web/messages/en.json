@@ -1838,6 +1838,14 @@
       "openAction": "Open",
       "gapChanged": "The gap changed since the page loaded. Refresh to see the latest."
     },
+    "header": {
+      "lastRun": "Last run {when}",
+      "noRuns": "No runs yet",
+      "nextRun": "next run in {when}",
+      "minutes": "{n}m",
+      "hours": "{n}h",
+      "days": "{n}d"
+    },
     "opportunities": {
       "title": "Opportunities",
       "seeAll": "See all",
