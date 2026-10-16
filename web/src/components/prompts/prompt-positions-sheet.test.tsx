@@ -8,7 +8,8 @@ import type { PromptPositionsData } from '@/lib/actions/prompt-positions';
 
 /**
  * The positions panel over a week: its cards carry the table's answer,
- * mention and citation counts beside the days.
+ * mention and citation counts beside the days, and a day block shows its
+ * positions in a tooltip when hovered.
  */
 
 const { getPromptPositions } = vi.hoisted(() => ({ getPromptPositions: vi.fn() }));
@@ -142,5 +143,22 @@ describe('PromptPositionsSheet', () => {
     expect(document.body.textContent).toContain(
       'Answer counts cover the platforms your plan includes.',
     );
+  });
+
+  it("shows a day's positions in a tooltip when its block is hovered", async () => {
+    await open();
+    const block = document.querySelector<HTMLElement>('[data-day="2026-10-08"]')!;
+    // The browser's own tooltip is gone: it lagged and couldn't be styled.
+    expect(block.hasAttribute('title')).toBe(false);
+
+    await act(async () => {
+      block.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+      block.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    const tooltip = document.querySelector('[data-slot="tooltip-content"]');
+    expect(tooltip?.textContent).toContain('Oct 8, 2026 · 1 run');
+    expect(tooltip?.textContent).toContain('Mentioned · Mid · #2 of 3');
+    expect(tooltip?.textContent).toContain('Cited · Early · #1 of 4');
   });
 });
