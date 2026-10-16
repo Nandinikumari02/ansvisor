@@ -42,6 +42,7 @@ import { getTopicById } from '@/lib/actions/topic';
 import { getOrgPlan } from '@/lib/guards/plan-guard';
 import { getOrgLocationUsage } from '@/lib/prompt-locations';
 import { getPromptSuggestions } from '@/lib/actions/prompt-suggestions';
+import { nextScheduledRun } from '@/lib/tracking-schedule';
 import { getContentUsage } from '@/lib/actions/content';
 import type { ContentUsage } from '@/lib/content-usage';
 import { percentageChange } from '@/lib/metrics';
@@ -774,6 +775,10 @@ export interface TrackingWindow {
   anchored: { dateFrom: string; dateTo: string } | null;
   /** A full run currently in flight (cron or manual), for the progress banner. */
   activeRun: { startedAt: string; source: string } | null;
+  /** The brand's last completed full run, scheduled or Run All (VIS-012); null before its first. */
+  lastRunAt: string | null;
+  /** When the next scheduled run is due, from the last ones (VIS-012); null when not known. */
+  nextRunAt: string | null;
 }
 
 /**
@@ -792,7 +797,7 @@ export interface TrackingWindow {
 export async function getTrackingWindow(brandId: string): Promise<TrackingWindow> {
   const supabase = await dbClient();
 
-  const [completedResp, activeResp] = await Promise.all([
+  const [completedResp, activeResp, scheduledResp] = await Promise.all([
     supabase
       .from('tracking_runs')
       .select('completed_at')
@@ -810,6 +815,14 @@ export async function getTrackingWindow(brandId: string): Promise<TrackingWindow
       .gte('started_at', new Date(Date.now() - 2 * 3600_000).toISOString())
       .order('started_at', { ascending: false })
       .limit(1),
+    // The daily runs, for when the next one is due (the header's "next run in 13h").
+    supabase
+      .from('tracking_runs')
+      .select('started_at')
+      .eq('brand_id', brandId)
+      .eq('source', 'cron')
+      .order('started_at', { ascending: false })
+      .limit(2),
   ]);
 
   const completed = completedResp.data ?? [];
@@ -829,6 +842,8 @@ export async function getTrackingWindow(brandId: string): Promise<TrackingWindow
     activeRun: active
       ? { startedAt: active.started_at as string, source: (active.source as string) ?? 'manual' }
       : null,
+    lastRunAt: latest ?? null,
+    nextRunAt: nextScheduledRun((scheduledResp.data ?? []).map((r) => r.started_at as string)),
   };
 }
 
