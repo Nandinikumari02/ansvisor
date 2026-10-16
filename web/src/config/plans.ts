@@ -155,7 +155,7 @@ export const PLANS: Record<PlanId, Plan> = {
       maxSiteAudits: 100,
       maxDailyOnDemand: 3,
       onDemandCooldownMinutes: 15,
-      allowedScrapers: ['chatgpt-web', 'perplexity-web'],
+      allowedScrapers: ['chatgpt-web', 'copilot-web'],
       allowedModels: [],
       features: [
         'basic_insights',
