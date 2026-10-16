@@ -163,7 +163,7 @@ import { toCsv } from '@/lib/csv';
 import { formatRelative } from '@/lib/format-relative';
 import { compareNullsLast, type SortDir } from './prompt-sort';
 import { BulkActionBar } from './_bulk-action-bar';
-import { formatCompactNumber } from '@/lib/format';
+import { formatCompactNumber, formatNumber } from '@/lib/format';
 import { usePagination, TablePager } from '@/components/table-pager';
 import { PromptPositionsSheet } from '@/components/prompts/prompt-positions-sheet';
 import {
@@ -2217,7 +2217,7 @@ export default function PromptsPage() {
                           </TableCell>
 
                           <TableCell className="text-right tabular-nums text-sm text-muted-foreground">
-                            {row.totalGoogleVolume.toLocaleString()}
+                            {formatNumber(row.totalGoogleVolume)}
                           </TableCell>
                           <TableCell className="text-right">
                             <VolumePill value={row.estAiVolume} />
@@ -3455,14 +3455,14 @@ function AllPromptsTab({
                   </TableCell>
                   <TableCell className="text-right tabular-nums text-sm">
                     {vis ? (
-                      vis.totalMentions.toLocaleString()
+                      formatNumber(vis.totalMentions)
                     ) : (
                       <span className="text-xs text-muted-foreground">—</span>
                     )}
                   </TableCell>
                   <TableCell className="text-right tabular-nums text-sm">
                     {vis ? (
-                      vis.totalCitations.toLocaleString()
+                      formatNumber(vis.totalCitations)
                     ) : (
                       <span className="text-xs text-muted-foreground">—</span>
                     )}
@@ -3506,7 +3506,7 @@ function AllPromptsTab({
                   </TableCell>
                   <TableCell className="text-right tabular-nums text-sm">
                     {vis ? (
-                      vis.runs.toLocaleString()
+                      formatNumber(vis.runs)
                     ) : (
                       <span className="text-xs text-muted-foreground">—</span>
                     )}
