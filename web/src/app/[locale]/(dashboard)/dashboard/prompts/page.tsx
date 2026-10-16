@@ -343,6 +343,15 @@ const PROMPT_EXPORT_HINT = 'No prompts yet - add prompts first.';
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const VALID_TABS = ['all', 'fanout', 'insights'] as const;
+
+/**
+ * The window a tab opens on. Query Fan-out opens on 7 days: one day of
+ * answers holds few searches, and an engine that only some answers search
+ * with looks absent in it.
+ */
+function defaultRangeFor(tab: string): PromptRangePreset {
+  return tab === 'fanout' ? '7d' : DEFAULT_PROMPT_RANGE_PRESET;
+}
 type TabId = (typeof VALID_TABS)[number];
 
 const PROMPT_VIEWS = ['tracked', 'suggestions'] as const;
@@ -1312,7 +1321,7 @@ export default function PromptsPage() {
     // than silently dropping them back to the default.
     if (isPromptRangePreset(raw)) return raw;
     if (raw && isPromptRangePreset(`${raw}d`)) return `${raw}d` as PromptRangePreset;
-    return DEFAULT_PROMPT_RANGE_PRESET;
+    return defaultRangeFor(initialTab);
   })();
   const [rangePreset, setRangePreset] = useState<PromptRangePreset>(initialRange);
   // Which tracked location the health columns describe. Empty = every
@@ -1356,7 +1365,7 @@ export default function PromptsPage() {
     // The default range stays out of the URL so shared links keep their
     // existing shape unless the user actually picked a different window.
     const want: Record<string, string | null> = {
-      range: rangePreset === DEFAULT_PROMPT_RANGE_PRESET ? null : rangePreset,
+      range: rangePreset === defaultRangeFor(tab) ? null : rangePreset,
       from: rangePreset === 'custom' && customFrom ? customFrom : null,
       to: rangePreset === 'custom' && customTo ? customTo : null,
       region: regionFilter || null,
@@ -1771,7 +1780,16 @@ export default function PromptsPage() {
         </div>
       </div>
 
-      <Tabs value={tab} onValueChange={(v) => setTab(v as TabId)}>
+      <Tabs
+        value={tab}
+        onValueChange={(v) => {
+          const next = v as TabId;
+          // A window still on this tab's default wasn't picked by the user,
+          // so it follows the next tab's own (Query Fan-out opens on 7 days).
+          if (rangePreset === defaultRangeFor(tab)) setRangePreset(defaultRangeFor(next));
+          setTab(next);
+        }}
+      >
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <TabsList>
             <TabsTrigger value="all">Prompts</TabsTrigger>
