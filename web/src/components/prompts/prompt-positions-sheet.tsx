@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslations } from 'next-intl';
 import {
   AlertTriangle,
   CalendarDays,
@@ -52,6 +53,7 @@ import type {
   PlatformDay,
   PlatformPositions,
   PositionStats,
+  PositionsSummary,
 } from '@/lib/prompt-positions';
 import type { Sentiment } from '@/types';
 import { actionCenterLink } from '@/lib/prompt-improve';
@@ -357,14 +359,59 @@ function LoadError({ message, onRetry }: { message: string; onRetry: () => void 
 
 // ─── Shared pieces ────────────────────────────────────────────────────────────
 
-function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function Stat({
+  label,
+  value,
+  sub,
+  detail,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  /** The answer-level count beside the card's days or platforms (the table's numbers). */
+  detail?: string;
+}) {
   return (
     <div className="rounded-lg border p-3">
       <p className="text-[11px] font-medium text-muted-foreground">{label}</p>
       <p className="mt-1 text-lg font-semibold leading-tight tabular-nums">{value}</p>
       {sub && <p className="mt-0.5 text-[11px] text-muted-foreground">{sub}</p>}
+      {detail && <p className="mt-0.5 text-[11px] text-muted-foreground">{detail}</p>}
     </div>
   );
+}
+
+/**
+ * The answers behind a card, as the Prompts table counts them: its Runs,
+ * Mentions and Citations columns sum answers, not days or platforms. The 24h
+ * cards count platforms, so their lines say they cover the whole period.
+ * Locked platforms' answers are never read here, so where the plan locks one
+ * the counts say they cover the included platforms only.
+ */
+function useAnswerDetails(data: PromptPositionsData, { latest }: { latest: boolean }) {
+  const t = useTranslations('prompts.positions');
+  const s: PositionsSummary = data.summary;
+  return {
+    mentioned: t(latest ? 'mentionedInPeriod' : 'mentionedIn', {
+      mentioned: s.mentionedAnswers,
+      answers: s.answers,
+      mentions: s.mentions,
+    }),
+    cited: t(latest ? 'citedInPeriod' : 'citedIn', {
+      cited: s.citedAnswers,
+      answers: s.answers,
+      citations: s.citations,
+    }),
+    answers: t(latest ? 'answersInPeriod' : 'answers', { count: s.answers }),
+    includedOnly: data.platforms.some((p) => p.access.state === 'locked')
+      ? t('includedOnly')
+      : null,
+  };
+}
+
+/** Says the answer counts leave out the platforms the plan locks. */
+function IncludedOnlyNote({ note }: { note: string | null }) {
+  return note ? <p className="text-xs text-muted-foreground">{note}</p> : null;
 }
 
 function PlatformName({ platform }: { platform: { id: string; label: string } }) {
@@ -523,6 +570,7 @@ function LatestView({
     latestPositions.length > 0
       ? `#${Math.round((latestPositions.reduce((a, b) => a + b, 0) / latestPositions.length) * 10) / 10}`
       : '—';
+  const details = useAnswerDetails(data, { latest: true });
 
   return (
     <div className="space-y-4">
@@ -531,11 +579,23 @@ function LatestView({
           label="Platforms answered"
           value={`${answered.length} / ${included.length}`}
           sub="in their latest run"
+          detail={details.answers}
         />
-        <Stat label="Mentioned on" value={`${mentioned} / ${answered.length}`} sub="platforms" />
-        <Stat label="Cited on" value={`${cited} / ${answered.length}`} sub="platforms" />
+        <Stat
+          label="Mentioned on"
+          value={`${mentioned} / ${answered.length}`}
+          sub="platforms"
+          detail={details.mentioned}
+        />
+        <Stat
+          label="Cited on"
+          value={`${cited} / ${answered.length}`}
+          sub="platforms"
+          detail={details.cited}
+        />
         <Stat label="Avg. position" value={avg} sub="when mentioned" />
       </div>
+      <IncludedOnlyNote note={details.includedOnly} />
 
       <Tabs defaultValue={initialTab}>
         <TabsList>
@@ -618,6 +678,7 @@ function PeriodView({
   initialTab: 'platforms' | 'improve';
 }) {
   const s = data.summary;
+  const details = useAnswerDetails(data, { latest: false });
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -625,16 +686,19 @@ function PeriodView({
           label="Runs"
           value={String(s.runs)}
           sub={`${s.trackedDays} of ${plural(s.days.length, 'day')} tracked`}
+          detail={details.answers}
         />
         <Stat
           label="Mentioned"
           value={`${s.mentionedDays} / ${plural(s.trackedDays, 'day')}`}
           sub={`${s.trackedDays - s.mentionedDays} not mentioned`}
+          detail={details.mentioned}
         />
         <Stat
           label="Cited"
           value={`${s.citedDays} / ${plural(s.trackedDays, 'day')}`}
           sub={`${s.trackedDays - s.citedDays} not cited`}
+          detail={details.cited}
         />
         <Stat
           label="Avg. position"
@@ -646,6 +710,7 @@ function PeriodView({
           }
         />
       </div>
+      <IncludedOnlyNote note={details.includedOnly} />
       {s.untrackedDays > 0 && (
         <p className="text-xs text-muted-foreground">
           {plural(s.untrackedDays, 'day')} without a completed run. Untracked days don&apos;t count
