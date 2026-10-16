@@ -91,6 +91,10 @@ describe('heatShade', () => {
 });
 
 describe('parseTopicCompetitors', () => {
+  it("hides the map when the caller can't read the brand: the RPC returns null (00152)", () => {
+    expect(parseTopicCompetitors(null)).toBeNull();
+  });
+
   it('reads the RPC payload and refuses rollups not yet backfilled', () => {
     const [parsed] = parseTopicCompetitors({
       complete: true,
