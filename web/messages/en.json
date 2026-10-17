@@ -3275,6 +3275,38 @@
       "clearSelection": "Clear",
       "selectAll": "Select every answer on this page",
       "selectRow": "Select the answer to “{prompt}” on {platform}"
+    },
+    "export": {
+      "copySummary": "Copy summary",
+      "copying": "Copying…",
+      "copied": "Summary copied",
+      "copyFailed": "Couldn't copy the summary. Try again in a moment.",
+      "copyBlocked": "Your browser didn't allow copying here. Allow clipboard access for this site and try again.",
+      "exportFailed": "Couldn't export the mentions. Try again in a moment.",
+      "nothing": "No mentions to export for these filters.",
+      "capped": "The file holds {shown} of {total} mentions. Narrow the filters to export the rest.",
+      "pickDates": "Choose a start or end date first.",
+      "reports": "Reports",
+      "exportSelected": "Export",
+      "facts": {
+        "period": "Period",
+        "periodDays": "{from} – {to} ({days, plural, one {# day} other {# days}}, UTC)",
+        "periodMoments": "{from} – {to} UTC",
+        "responses": "Tracked responses (n)",
+        "mentions": "Mentions (n)",
+        "prompts": "Prompts with mentions (n)",
+        "inFile": "Mentions in this file (n)",
+        "note": "Note",
+        "capped": "Only the first {shown} of {total} mentions, in the table's order. Narrow the filters to export the rest.",
+        "exported": "Exported (UTC)"
+      },
+      "summary": {
+        "title": "Mentions & Sentiment · {brand}",
+        "search": "Search: “{q}”",
+        "kpi": "{label}: {value}",
+        "kpiChange": "{label}: {value} ({change})",
+        "net": "{net} · {split} (n={count})"
+      }
     }
   },
   "competitors": {
