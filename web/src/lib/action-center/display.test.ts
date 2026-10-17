@@ -309,7 +309,7 @@ describe('History events', () => {
    *  checking nothing. */
   it('reads the events the server actions log', () => {
     expect(logged).toEqual(
-      expect.arrayContaining(['status_changed', 'task_added', 'task_renamed', 'task_deleted']),
+      expect.arrayContaining(['status_changed', 'task_added', 'task_edited', 'task_deleted']),
     );
   });
 

@@ -21,6 +21,7 @@ import {
 import { mapSignalRows, type SignalRow } from '@/lib/signals/map';
 import { readPromptPlaces } from '@/lib/signals/prompt-places';
 import { signalDetailForApi, type SignalActionRef } from '@/lib/signals/detail';
+import { parseTaskDetails } from '@/lib/action-center/task-details';
 
 /**
  * Pure data-fetch functions shared by the MCP route and the parallel REST
@@ -2661,9 +2662,29 @@ export interface ActionDetailForMcp {
     mode: string | null;
     permission: string | null;
     depends_on: string[];
+    details: ReturnType<typeof mcpTaskDetails>;
   }>;
   signals: Record<string, unknown>[];
   events: Array<{ event: string; data: Record<string, unknown>; created_at: string }>;
+}
+
+/** A task's details in the snake_case the rest of the MCP output uses. */
+function mcpTaskDetails(raw: unknown) {
+  const d = parseTaskDetails(raw);
+  if (!d) return null;
+  return {
+    where: d.where,
+    why: d.why,
+    how: d.how,
+    done_when: d.doneWhen,
+    type: d.type,
+    effort: d.effort,
+    role: d.role,
+    body: d.body,
+    platform: d.platform,
+    platform_label: d.platformLabel,
+    sources: d.sources,
+  };
 }
 
 export async function getActionFor(
@@ -2687,7 +2708,7 @@ export async function getActionFor(
     supabaseAdmin
       .from('action_tasks')
       .select(
-        'id, position, task_key, title, title_params, status, skip_reason, mode, permission, depends_on',
+        'id, position, task_key, title, title_params, status, skip_reason, mode, permission, depends_on, details',
       )
       .eq('action_id', actionId)
       .order('position'),
@@ -2740,6 +2761,8 @@ export async function getActionFor(
       mode: t.mode ?? null,
       permission: t.permission ?? null,
       depends_on: (t.depends_on ?? []) as string[],
+      // Where, why, how and done-when (AC-004); an Improve task's body and evidence.
+      details: mcpTaskDetails(t.details),
     })),
     // The join that found them is not part of a signal.
     signals: ((signalsRes.data ?? []) as Record<string, unknown>[]).map((row) =>
