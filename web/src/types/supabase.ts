@@ -139,6 +139,10 @@ export type Database = {
           outcome: string
           payload: Json
           position_outcome: Json | null
+          priority_level: string | null
+          priority_reason: Json | null
+          priority_score: number | null
+          priority_updated_at: string | null
           status: string
           updated_at: string
           validated_at: string | null
@@ -161,6 +165,10 @@ export type Database = {
           outcome?: string
           payload?: Json
           position_outcome?: Json | null
+          priority_level?: string | null
+          priority_reason?: Json | null
+          priority_score?: number | null
+          priority_updated_at?: string | null
           status?: string
           updated_at?: string
           validated_at?: string | null
@@ -183,6 +191,10 @@ export type Database = {
           outcome?: string
           payload?: Json
           position_outcome?: Json | null
+          priority_level?: string | null
+          priority_reason?: Json | null
+          priority_score?: number | null
+          priority_updated_at?: string | null
           status?: string
           updated_at?: string
           validated_at?: string | null
