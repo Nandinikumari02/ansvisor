@@ -4,6 +4,7 @@ import { createTranslator } from 'next-intl';
 import { describe, expect, it } from 'vitest';
 import {
   actionContextTags,
+  actionEventText,
   actionGoal,
   actionTexts,
   eventTaskText,
@@ -223,6 +224,37 @@ describe('eventTaskText', () => {
     expect(eventTaskText(undefined, withHas)).toBe('');
     expect(eventTaskText('', withHas)).toBe('');
     expect(eventTaskText(42, withHas)).toBe('');
+  });
+});
+
+describe('actionEventText', () => {
+  const page = createTranslator({ locale: 'en', messages, namespace: 'actionCenter.actionsPage' });
+  const tPage = (key: string, values?: Record<string, string | number>) =>
+    page(key as Parameters<typeof page>[0], values);
+  const event = (name: string, data: Record<string, unknown>) => ({
+    id: 'e1',
+    event: name,
+    data,
+    actorId: null,
+    createdAt: '2026-10-16T00:00:00Z',
+  });
+
+  it('reads the 30-day position result with its counts', () => {
+    expect(
+      actionEventText(event('position_outcome_recorded', { improved: 2, measurable: 3 }), tPage, t),
+    ).toBe('30-day result: position improved on 2 of 3 platforms');
+    expect(
+      actionEventText(event('position_outcome_recorded', { improved: 0, measurable: 0 }), tPage, t),
+    ).toBe('30-day result: not enough data to compare positions');
+  });
+
+  it("passes a task's own title and the measured verdict", () => {
+    expect(actionEventText(event('task_added', { title: 'Ask the agency' }), tPage, t)).toBe(
+      'Task added: “Ask the agency”',
+    );
+    expect(actionEventText(event('outcome_measured', { outcome: 'improved' }), tPage, t)).toBe(
+      'Result: metrics improved after this action closed',
+    );
   });
 });
 
