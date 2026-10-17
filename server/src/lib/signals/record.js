@@ -30,6 +30,7 @@ import supabaseAdmin from '../../config/supabase.js';
 import { computePulseMetrics, LOST_CITATION_WINDOW_DAYS } from '../pulse/metrics.js';
 import { lostCitationEvidence } from './lost-citation-evidence.js';
 import { competitorEvidence } from './competitor-evidence.js';
+import { mentionEvidence } from './mention-evidence.js';
 import { logger } from '../logger.js';
 import { readAllRpcRows } from '../rpc-pages.js';
 import { resolve } from '../../config/action-engine.js';
@@ -249,18 +250,22 @@ export async function uncitedMentionCandidates(brandId, now) {
   if (error) throw new Error(error.message);
 
   // By id, not by row: a prompt repeated at a page boundary is still one prompt.
-  const uncited = [
-    ...new Set(
-      (data ?? [])
-        .filter(
-          (row) =>
-            Number(row.runs) > 0 &&
-            Number(row.total_mentions) > 0 &&
-            Number(row.total_citations) === 0,
-        )
-        .map((row) => row.prompt_id),
-    ),
-  ];
+  const byPrompt = new Map();
+  for (const row of data ?? []) {
+    if (
+      Number(row.runs) > 0 &&
+      Number(row.total_mentions) > 0 &&
+      Number(row.total_citations) === 0
+    ) {
+      byPrompt.set(row.prompt_id, row);
+    }
+  }
+  // Most mentioned first: the prompts the panel describes are the first few.
+  const uncited = [...byPrompt.values()].sort(
+    (a, b) =>
+      Number(b.total_mentions) - Number(a.total_mentions) ||
+      String(a.prompt_id).localeCompare(String(b.prompt_id)),
+  );
   if (uncited.length < detection.uncitedMinPrompts) return [];
 
   return [
@@ -268,7 +273,7 @@ export async function uncitedMentionCandidates(brandId, now) {
       kind: 'uncited_mentions',
       dedupKey: 'uncited_mentions',
       source: ['ai_results'],
-      payload: { promptIds: uncited.slice(0, 50) },
+      payload: { promptIds: uncited.map((row) => row.prompt_id).slice(0, 50) },
       previousValue: null,
       currentValue: uncited.length,
       changeValue: null,
@@ -596,6 +601,7 @@ const COMPETITOR_KINDS = new Set([
 for (const kind of COMPETITOR_KINDS) {
   EVIDENCE[kind] = { marker: 'positions', fields: ['positions', 'winningSources'] };
 }
+EVIDENCE.uncited_mentions = { marker: 'mentions', fields: ['mentions'] };
 
 /**
  * A night whose evidence read failed refreshes a signal with its bare
@@ -612,6 +618,29 @@ export function keepRecordedEvidence(candidates, existing) {
       evidence.fields.filter((key) => key in recorded).map((key) => [key, recorded[key]]),
     );
     candidate.payload = { ...candidate.payload, ...kept };
+  }
+}
+
+/**
+ * An uncited-mentions signal names its prompts and nothing about them. Before
+ * it is written, its first prompts get what the drawer shows (AC-001): the
+ * platforms, the brand's position, the answers' sentiment, and a quote of
+ * the newest one. Best effort, like the other evidence.
+ */
+export async function attachMentionEvidence(brandId, candidates, now) {
+  const uncited = candidates.filter(
+    (c) => c.kind === 'uncited_mentions' && Array.isArray(c.payload?.promptIds),
+  );
+  for (const candidate of uncited) {
+    try {
+      const mentions = await mentionEvidence(brandId, candidate.payload.promptIds, {
+        now,
+        windowDays: detection.windowDays,
+      });
+      candidate.payload = { ...candidate.payload, mentions };
+    } catch (err) {
+      logger.warn({ brandId, err: err.message }, '[signals] mention evidence unavailable');
+    }
   }
 }
 
@@ -737,6 +766,7 @@ export async function recordSignalsForBrand(brandId, { now = new Date() } = {}) 
     (candidate) => !(outage && DECLINE_KINDS.has(candidate.kind)),
   );
   await attachCompetitorEvidence(brandId, [...candidates, ...overflow], now);
+  await attachMentionEvidence(brandId, candidates, now);
 
   // Existing rows decide insert vs update vs reopen. A brand's signal set is
   // small (tens), so reading it whole is cheaper than being clever.
