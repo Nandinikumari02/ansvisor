@@ -3,11 +3,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 /**
  * AC-007: when a signal starts or stops supporting its action, the server is
  * asked to score the action again, after the response has gone. Moves that
- * leave the signal open, and signals no action holds, ask for nothing.
+ * leave the signal open, and signals no action holds, ask for nothing; copies
+ * of one finding that share an action ask once.
  */
 
-let previousStatus: string | null;
-let actionId: string | null;
+let rows: { id: string; status: string; action_id: string | null }[];
 let writes: Record<string, unknown>[];
 const fetchMock = vi.fn();
 
@@ -18,25 +18,27 @@ vi.mock('@/lib/supabase/server', () => ({
     auth: { getSession: async () => ({ data: { session: { access_token: 'token-1' } } }) },
     from: () => {
       let patch: Record<string, unknown> | null = null;
+      let ids: string[] = [];
       const chain = {
         select: () => chain,
         eq: () => chain,
-        in: () => chain,
+        in: (_column: string, values: string[]) => {
+          ids = values;
+          return chain;
+        },
         update: (values: Record<string, unknown>) => {
           patch = values;
           writes.push(values);
           return chain;
         },
-        // The read before the change, then the updated rows.
-        then: (resolve: (value: unknown) => unknown) =>
-          resolve(
+        then: (resolve: (value: unknown) => unknown) => {
+          const matched = rows.filter((row) => ids.includes(row.id));
+          return resolve(
             patch
-              ? { data: [{ id: 's1', action_id: actionId }], error: null }
-              : {
-                  data: previousStatus ? [{ id: 's1', status: previousStatus }] : [],
-                  error: null,
-                },
-          ),
+              ? { data: matched.map(({ id, action_id }) => ({ id, action_id })), error: null }
+              : { data: matched.map(({ id, status }) => ({ id, status })), error: null },
+          );
+        },
       };
       return chain;
     },
@@ -46,8 +48,7 @@ vi.mock('@/lib/supabase/server', () => ({
 const { updateSignalStatus } = await import('./signals');
 
 beforeEach(() => {
-  previousStatus = 'new';
-  actionId = 'a1';
+  rows = [{ id: 's1', status: 'new', action_id: 'a1' }];
   writes = [];
   fetchMock.mockReset();
   fetchMock.mockResolvedValue({ ok: true, status: 200 });
@@ -69,9 +70,19 @@ describe('updateSignalStatus', () => {
   });
 
   it('asks again when a dismissed signal is reopened', async () => {
-    previousStatus = 'dismissed';
+    rows[0].status = 'dismissed';
     await updateSignalStatus('b1', ['s1'], 'new');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks once for copies of one finding that share an action', async () => {
+    rows = [
+      { id: 's1', status: 'new', action_id: 'a1' },
+      { id: 's2', status: 'new', action_id: 'a1' },
+      { id: 's3', status: 'new', action_id: 'a2' },
+    ];
+    await updateSignalStatus('b1', ['s1', 's2', 's3'], 'dismissed');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('asks nothing when the signal stays open', async () => {
@@ -81,7 +92,7 @@ describe('updateSignalStatus', () => {
   });
 
   it('asks nothing for a signal no action holds', async () => {
-    actionId = null;
+    rows[0].action_id = null;
     await updateSignalStatus('b1', ['s1'], 'resolved');
     expect(fetchMock).not.toHaveBeenCalled();
   });
