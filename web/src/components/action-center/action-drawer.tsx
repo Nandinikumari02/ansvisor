@@ -75,6 +75,7 @@ import { ImproveContext } from './improve-context';
 import { TopicGapContext } from './topic-gap-context';
 import { TopicOpportunityContext } from './topic-opportunity-context';
 import { TaskDetailForm, TaskDetailView, TaskTypeBadge } from './task-detail';
+import { RegenerateTasks, taskWriterEnabled } from './regenerate-tasks';
 import { hasTaskSpec, type TaskDetailsEdit } from '@/lib/action-center/task-details';
 import { ImproveOutcomeCard } from './improve-outcome-card';
 import { improvePlatformLabels } from '@/lib/improve-outcome';
@@ -545,6 +546,24 @@ export function ActionDrawer({
                 t={t}
                 onAdd={(title) => void mutate(() => addTask(brandId, action.id, title))}
               />
+              {/* Written from the action's evidence (AC-004): not for an
+                  action a person sent, which carries its own, nor a closed one. */}
+              {taskWriterEnabled() &&
+                action.kind !== 'prompt_improve' &&
+                !opportunityId &&
+                action.status !== 'completed' &&
+                action.status !== 'dismissed' &&
+                detail.signals.length > 0 && (
+                  <RegenerateTasks
+                    actionId={action.id}
+                    disabled={isBusy}
+                    onBusyChange={setIsBusy}
+                    onDone={async () => {
+                      await load();
+                      onChanged();
+                    }}
+                  />
+                )}
             </section>
           ) : tab === 'signals' ? (
             <section className="space-y-2">
