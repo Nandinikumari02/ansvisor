@@ -21,6 +21,12 @@ import {
 import { SIGNAL_ROW_COLUMNS, mapSignalRows, type Signal, type SignalRow } from '@/lib/signals/map';
 import type { KpiTimeframe } from '@/lib/kpis/registry';
 import { parseImproveOutcome, type ImproveOutcome } from '@/lib/improve-outcome';
+import {
+  parsePriorityReason,
+  storedPriorityLevel,
+  type PriorityLevel,
+  type PriorityReason,
+} from '@/lib/action-center/priority';
 
 export interface ActionAssignee {
   id: string;
@@ -49,6 +55,10 @@ export interface ActionItem {
   taskTotal: number;
   taskCompleted: number;
   signalCount: number;
+  /** 0–100 (AC-006); null until the server has scored the action. */
+  priorityScore: number | null;
+  priorityLevel: PriorityLevel | null;
+  priorityReason: PriorityReason | null;
 }
 
 interface ActionRow {
@@ -64,10 +74,14 @@ interface ActionRow {
   due_date: string | null;
   created_at: string;
   updated_at: string;
+  priority_score: number | null;
+  priority_level: string | null;
+  priority_reason: unknown;
+  priority_updated_at: string | null;
 }
 
 const ACTION_COLUMNS =
-  'id, action_no, category, kind, impact, status, payload, kpi_keys, assignee_id, due_date, created_at, updated_at';
+  'id, action_no, category, kind, impact, status, payload, kpi_keys, assignee_id, due_date, created_at, updated_at, priority_score, priority_level, priority_reason, priority_updated_at';
 
 export async function getActions(brandId: string): Promise<ActionItem[]> {
   const supabase = await createClient();
@@ -140,6 +154,14 @@ export async function getActions(brandId: string): Promise<ActionItem[]> {
     taskTotal: taskTotals.get(row.id)?.total ?? 0,
     taskCompleted: taskTotals.get(row.id)?.completed ?? 0,
     signalCount: signalCounts.get(row.id) ?? 0,
+    priorityScore: row.priority_score === null ? null : Number(row.priority_score),
+    priorityLevel: storedPriorityLevel(
+      row.priority_level,
+      row.priority_score === null ? null : Number(row.priority_score),
+    ),
+    priorityReason: parsePriorityReason(row.priority_reason, {
+      scoredAt: row.priority_updated_at,
+    }),
   }));
 }
 
