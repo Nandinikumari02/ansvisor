@@ -24,6 +24,7 @@ import { OPEN_SIGNAL_STATUSES, type SignalStatus } from '@/lib/signals/registry'
 import { readPromptPlaces } from '@/lib/signals/prompt-places';
 import { affectedOf, affectedSignals, affectedSummary } from '@/lib/action-center/affected';
 import { readPromptDemand } from '@/lib/action-center/prompt-demand';
+import { readAssignees } from '@/lib/action-center/assignees';
 import {
   ACTION_COLUMNS,
   EVENT_COLUMNS,
@@ -48,6 +49,8 @@ export interface ActionAssignee {
   id: string;
   fullName: string | null;
   avatarUrl: string | null;
+  /** What names a member with no full name (most have none); see readAssignees. */
+  email?: string | null;
 }
 
 export interface ActionItem {
@@ -91,7 +94,7 @@ export async function getActions(brandId: string): Promise<ActionItem[]> {
   const actionIds = rows.map((row) => row.id);
   const assigneeIds = [...new Set(rows.map((row) => row.assignee_id).filter(Boolean))] as string[];
 
-  const [tasksRes, signalsRes, profilesRes] = await Promise.all([
+  const [tasksRes, signalsRes, profiles] = await Promise.all([
     supabase.from('action_tasks').select('action_id, status').in('action_id', actionIds),
     // The signals that support each action now (AC-007): its open ones.
     supabase
@@ -100,13 +103,11 @@ export async function getActions(brandId: string): Promise<ActionItem[]> {
       .eq('brand_id', brandId)
       .in('status', OPEN_SIGNAL_STATUSES as SignalStatus[])
       .not('action_id', 'is', null),
-    assigneeIds.length > 0
-      ? supabase.from('profiles').select('id, full_name, avatar_url').in('id', assigneeIds)
-      : Promise.resolve({ data: [], error: null }),
+    // Other members' profiles are hidden from the user (RLS): read as the team list reads them.
+    readAssignees(supabase, brandId, assigneeIds),
   ]);
   if (tasksRes.error) throw new Error(tasksRes.error.message);
   if (signalsRes.error) throw new Error(signalsRes.error.message);
-  if (profilesRes.error) throw new Error(profilesRes.error.message);
 
   const taskStatuses = new Map<string, string[]>();
   for (const task of tasksRes.data ?? []) {
@@ -119,17 +120,6 @@ export async function getActions(brandId: string): Promise<ActionItem[]> {
     if (!signal.action_id) continue;
     signalCounts.set(signal.action_id, (signalCounts.get(signal.action_id) ?? 0) + 1);
   }
-  const profiles = new Map(
-    (profilesRes.data ?? []).map((p) => [
-      p.id as string,
-      {
-        id: p.id as string,
-        fullName: (p.full_name as string | null) ?? null,
-        avatarUrl: (p.avatar_url as string | null) ?? null,
-      },
-    ]),
-  );
-
   return rows.map((row) => {
     const progress = taskProgress(taskStatuses.get(row.id) ?? []);
     return actionItemFromRow(row, {
