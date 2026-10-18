@@ -2106,7 +2106,6 @@
       "issues": "Issues",
       "status": "Status",
       "lastAudit": "Last audit",
-      "trend": "Score trend: {scores}",
       "showHistory": "Show earlier audits of {page}",
       "hideHistory": "Hide earlier audits of {page}",
       "viewReport": "View report",
