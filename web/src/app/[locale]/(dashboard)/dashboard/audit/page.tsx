@@ -17,6 +17,7 @@ import {
   Settings,
 } from 'lucide-react';
 import { useRouter } from '@/i18n/navigation';
+import { useSearchParams } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -57,14 +58,13 @@ import { EmptyPoolMessage } from './_quota-meter';
 import { usePagesExport } from './_use-pages-export';
 import { nextAutoRun } from '@/lib/audit-auto-runs';
 import { cn } from '@/lib/utils';
+import { parseListTab, withListTab, type ListTab } from './_list-tab';
 
 type RangePreset = '7d' | '30d' | '90d' | 'all';
 const RANGE_DAYS: Record<RangePreset, number | null> = { '7d': 7, '30d': 30, '90d': 90, all: null };
 
 /** Pages one bulk request may audit (the server's BULK_AUDIT_MAX). */
 const BULK_REQUEST_MAX = 50;
-
-type ListTab = 'opportunities' | 'pages';
 
 /** A tab's count, as the mockup's grey pill. */
 function TabCount({ count }: { count: number }) {
@@ -126,14 +126,24 @@ export default function SiteAuditPage() {
   const { exporting, exportAll, exportPages } = usePagesExport(activeBrandId);
   // Capture "now" once (impure call belongs in a lazy initializer, not render).
   const [nowMs] = useState(() => Date.now());
+  // A list the address names (?tab=pages, the auto-audit e-mail's link) opens
+  // first on the brand the page opened with; another brand starts as usual.
+  const searchParams = useSearchParams();
+  const linked = useRef({ tab: parseListTab(searchParams.get('tab')), brandId: activeBrandId });
 
   const refetch = () => setRefreshKey((k: number) => k + 1);
+
+  // The address follows the list shown, so it can be shared or reopened.
+  const showList = (next: ListTab) => {
+    setTab(next);
+    window.history.replaceState(null, '', withListTab(window.location.href, next));
+  };
 
   // The run notice's View pages: the Pages list, latest audits first, so the
   // run's pages lead it (tagged Auto).
   const listsRef = useRef<HTMLDivElement>(null);
   const showPages = () => {
-    setTab('pages');
+    showList('pages');
     listsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
@@ -149,7 +159,9 @@ export default function SiteAuditPage() {
     // A selection, and the tab, belong to the brand they were made on.
     setSelected(new Set());
     setOppSelected(new Set());
-    setTab(null);
+    // The store may only know the brand after the first render: that's the one it opened with.
+    linked.current.brandId ??= activeBrandId;
+    setTab(activeBrandId === linked.current.brandId ? linked.current.tab : null);
     setOpps(null);
     setLatestRun(null);
     (async () => {
@@ -749,7 +761,7 @@ export default function SiteAuditPage() {
         <Tabs
           ref={listsRef}
           value={tab ?? (oppsLoading ? 'opportunities' : 'pages')}
-          onValueChange={(v) => setTab(v as ListTab)}
+          onValueChange={(v) => showList(v as ListTab)}
         >
           <TabsList variant="line" aria-label={t('lists.label')}>
             {(opps || oppsLoading) && (
