@@ -26,13 +26,13 @@ import {
 } from '@/lib/ai-bots';
 import {
   createBotConnection,
-  getBotConnections,
   revokeBotConnection,
   type BotConnectionKind,
   type BotConnections,
   type NewBotConnection,
 } from '@/lib/actions/ai-bots';
 import { SourceCard } from './_source-card';
+import { getBotConnections } from '@/lib/traffic-reads';
 
 const KINDS: BotConnectionKind[] = ['cloudflare_worker', 'cloudflare_logpush', 'vercel_drain'];
 
