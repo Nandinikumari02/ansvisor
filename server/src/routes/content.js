@@ -849,10 +849,16 @@ router.post('/bulk/send-webhook', async (req, res) => {
       .eq('brand_id', brandId)
       .eq('is_active', true)
       .limit(1)
-      .single();
+      .maybeSingle();
 
     if (!webhookConfig) {
-      return res.status(400).json({ error: 'No workflow connected' });
+      return res.status(400).json({ error: 'No workflow connected', code: 'no_webhook' });
+    }
+    if (!webhookConfig.events?.includes('opportunity.sent')) {
+      return res.status(409).json({
+        error: 'Webhook is not subscribed to Opportunity sent events.',
+        code: 'webhook_not_subscribed',
+      });
     }
 
     const { data: brand } = await supabaseAdmin
@@ -1031,10 +1037,16 @@ router.post('/:id/send-webhook', async (req, res) => {
       .eq('brand_id', opportunity.brand_id)
       .eq('is_active', true)
       .limit(1)
-      .single();
+      .maybeSingle();
 
     if (!webhookConfig) {
-      return res.status(400).json({ error: 'No workflow connected' });
+      return res.status(400).json({ error: 'No workflow connected', code: 'no_webhook' });
+    }
+    if (!webhookConfig.events?.includes('opportunity.sent')) {
+      return res.status(409).json({
+        error: 'Webhook is not subscribed to Opportunity sent events.',
+        code: 'webhook_not_subscribed',
+      });
     }
 
     const { data: brand } = await supabaseAdmin
