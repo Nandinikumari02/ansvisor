@@ -22,7 +22,12 @@ import {
   htmlFromSource,
   publishableHtml,
 } from '@/lib/content/clean-html';
-import { draftTitleFromDoc, lengthTarget, safeLinkHref } from '@/lib/content/editor';
+import {
+  PAGE_READ_DELAY_MS,
+  draftTitleFromDoc,
+  lengthTarget,
+  safeLinkHref,
+} from '@/lib/content/editor';
 import { JsonLd } from '@/lib/content/json-ld-node';
 import { detectPageType } from '@/lib/content/page-types';
 import { cn } from '@/lib/utils';
@@ -63,12 +68,16 @@ const DOCUMENT_CLASS = cn(
  * whole page, or one block, on the clipboard. The page type follows the page
  * as it is written until the person picks one (CE-023). The side panel, open
  * beside the page or closed from the header, shows what the page earns
- * (Impact, CE-016).
+ * (Impact, CE-016) and the sources it draws on (Sources, CE-008).
  */
 export function DraftEditor({ draft }: { draft: ContentDraft }) {
   const t = useTranslations('contentEditor.editor');
   const autosave = useDraftAutosave(draft.id, draft);
   const [title, setTitle] = useState(draft.title);
+  // The page as written now, for the side panel's Sources.
+  const [pageHtml, setPageHtml] = useState(draft.bodyHtml);
+  const pageReadTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(pageReadTimer.current), []);
   const [status, setStatus] = useState(draft.status);
   const [marking, setMarking] = useState(false);
   // A picked page type, or the one the page shows as it is written.
@@ -157,8 +166,13 @@ export function DraftEditor({ draft }: { draft: ContentDraft }) {
       const next = draftTitleFromDoc(e.getJSON());
       const bodyHtml = e.getHTML();
       setTitle(next);
-      setDetectedType(detectPageType({ title: next, html: bodyHtml }, draft.siteType));
       autosave.schedule({ title: next, bodyHtml });
+      // The panel and the type chip catch up once typing pauses.
+      clearTimeout(pageReadTimer.current);
+      pageReadTimer.current = setTimeout(() => {
+        setPageHtml(bodyHtml);
+        setDetectedType(detectPageType({ title: next, html: bodyHtml }, draft.siteType));
+      }, PAGE_READ_DELAY_MS);
     },
   });
 
@@ -395,7 +409,7 @@ export function DraftEditor({ draft }: { draft: ContentDraft }) {
           </div>
           {attachments.ui}
         </div>
-        {panelOpen && <EditorSidePanel draft={draft} />}
+        {panelOpen && <EditorSidePanel draft={draft} title={title} bodyHtml={pageHtml} />}
       </div>
     </div>
   );
