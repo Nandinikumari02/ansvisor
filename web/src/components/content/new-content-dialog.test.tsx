@@ -323,6 +323,9 @@ describe('New content', () => {
       });
       await act(async () => {});
       expect(document.body.textContent).toContain('Optimize: Pricing');
+      // Nothing overlaps, and Start still shows the draft optimizes the plan's page.
+      expect(document.body.textContent).toContain('No existing page answers these prompts');
+      expect(radio('Optimize /pricing').getAttribute('aria-checked')).toBe('true');
       await click(button('Open editor'));
       expect(createContentDraft.mock.calls[0][1]).toMatchObject({
         method: 'optimize',
@@ -330,6 +333,85 @@ describe('New content', () => {
         source: { kind: 'opportunity', id: 'o2' },
         sourceUrl: 'https://northwind.example/pricing',
       });
+    });
+
+    it('lets a person write a new page instead of the plan’s page when nothing overlaps', async () => {
+      getContentOverlap.mockResolvedValue({ totalPrompts: 2, pages: [] });
+      await render('b2b', {
+        kind: 'opportunity',
+        id: 'o2',
+        page: { url: 'https://northwind.example/pricing', title: 'Pricing' },
+      });
+      await act(async () => {});
+
+      await click(radio('Create a new page instead'));
+      expect(document.body.textContent).toContain('Create: CRM for real estate teams');
+      expect(radio('Optimize /pricing').getAttribute('aria-checked')).toBe('false');
+      await click(button('Open editor'));
+      expect(createContentDraft.mock.calls[0][1]).toMatchObject({
+        method: 'create',
+        title: 'CRM for real estate teams',
+      });
+    });
+
+    it('offers the plan’s page beside the check’s options, to come back to', async () => {
+      getContentOverlap.mockResolvedValue({
+        totalPrompts: 4,
+        pages: [
+          {
+            url: 'https://northwind.example/blog/crm-guide',
+            title: 'CRM guide',
+            promptsInCommon: 1,
+            citations: 6,
+            gscPosition: null,
+          },
+        ],
+      });
+      await render('b2b', {
+        kind: 'opportunity',
+        id: 'o2',
+        page: { url: 'https://northwind.example/pricing', title: 'Pricing' },
+      });
+      await act(async () => {});
+
+      const given = radio('Optimize /pricing');
+      expect(given.textContent).toContain('The page your Content plan picked');
+      expect(given.getAttribute('aria-checked')).toBe('true');
+      expect(radio('Create a new page, link /blog/crm-guide to it')).toBeDefined();
+
+      await click(radio('Add a section to /blog/crm-guide'));
+      expect(radio('Optimize /pricing').getAttribute('aria-checked')).toBe('false');
+      await click(radio('Optimize /pricing'));
+      expect(radio('Optimize /pricing').getAttribute('aria-checked')).toBe('true');
+      await click(button('Open editor'));
+      expect(createContentDraft.mock.calls[0][1]).toMatchObject({
+        method: 'optimize',
+        sourceUrl: 'https://northwind.example/pricing',
+      });
+    });
+
+    it('offers no second option for the plan’s page when the check names it too', async () => {
+      getContentOverlap.mockResolvedValue({
+        totalPrompts: 4,
+        pages: [
+          {
+            url: 'https://www.northwind.example/pricing/',
+            title: 'Pricing',
+            promptsInCommon: 3,
+            citations: 6,
+            gscPosition: null,
+          },
+        ],
+      });
+      await render('b2b', {
+        kind: 'opportunity',
+        id: 'o2',
+        page: { url: 'https://northwind.example/pricing', title: 'Pricing' },
+      });
+      await act(async () => {});
+
+      expect(document.body.textContent).not.toContain('The page your Content plan picked');
+      expect(radio('Optimize /pricing instead').getAttribute('aria-checked')).toBe('true');
     });
 
     it('leaves an opportunity no longer open to pick', async () => {
