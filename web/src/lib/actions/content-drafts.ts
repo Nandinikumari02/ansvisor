@@ -7,6 +7,8 @@ import { readAssignees } from '@/lib/action-center/assignees';
 import {
   DRAFT_STATUSES,
   PAGE_TYPES,
+  WRITING_STALE_MS,
+  agentStateOf,
   type ContentDraft,
   type ContentDraftListItem,
   type ContentOverlap,
@@ -64,6 +66,7 @@ import {
   type RestoredDraft,
   type VersionOrigin,
 } from '@/lib/content/history';
+import type { AgentWriteRequest } from '@/lib/content/agent-write';
 import {
   actionPages,
   completeDraftTasks,
@@ -98,7 +101,7 @@ export async function getContentDrafts(brandId: string): Promise<ContentDraftLis
     supabase
       .from('content_drafts')
       .select(
-        'id, title, page_type, method, status, author, created_by, score_before, score_after, updated_at',
+        'id, title, page_type, method, status, author, created_by, score_before, score_after, agent_state, agent_state_at, updated_at',
       )
       .eq('brand_id', brandId)
       .order('updated_at', { ascending: false })
@@ -127,6 +130,7 @@ export async function getContentDrafts(brandId: string): Promise<ContentDraftLis
     isMine: me !== null && row.created_by === me,
     scoreBefore: row.score_before,
     scoreAfter: row.score_after,
+    agentState: agentStateOf(row.agent_state, row.agent_state_at),
     updatedAt: row.updated_at,
   }));
 }
@@ -161,7 +165,7 @@ export async function getContentDraft(id: string): Promise<ContentDraft | null> 
   const { data, error } = await supabase
     .from('content_drafts')
     .select(
-      `id, brand_id, title, page_type, page_type_source, method, status, body_html, author, source_url, rules, action_id, updated_at, ${BRAND_SITE}, actions(action_no)`,
+      `id, brand_id, title, page_type, page_type_source, method, status, body_html, author, source_url, rules, action_id, agent_state, agent_state_at, updated_at, ${BRAND_SITE}, actions(action_no)`,
     )
     .eq('id', id)
     .maybeSingle();
@@ -184,6 +188,7 @@ export async function getContentDraft(id: string): Promise<ContentDraft | null> 
       data.action_id && data.actions
         ? { id: data.action_id, number: data.actions.action_no }
         : null,
+    agentState: agentStateOf(data.agent_state, data.agent_state_at),
     updatedAt: data.updated_at,
   };
 }
@@ -802,12 +807,17 @@ export async function saveContentDraft(
   const bodyHtml = sanitizeDraftHtml(parsed.data.bodyHtml);
   const supabase = await createClient();
   let expected = base.updatedAt;
+  // While the Content Agent writes the page (CE-015), a tab left open waits:
+  // the agent's page would go over its save. A 'writing' left by a stopped
+  // server doesn't hold it.
+  const writingSince = new Date(Date.now() - WRITING_STALE_MS).toISOString();
   for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt++) {
     const { data, error } = await supabase
       .from('content_drafts')
       .update({ title, body_html: bodyHtml })
       .eq('id', id)
       .eq('updated_at', expected)
+      .or(`agent_state.is.null,agent_state.neq.writing,agent_state_at.lt."${writingSince}"`)
       .select(`updated_at, page_type, page_type_source, ${BRAND_SITE}`)
       .maybeSingle();
     if (error) throw new Error(error.message);
@@ -837,11 +847,15 @@ export async function saveContentDraft(
 
     const { data: current, error: readError } = await supabase
       .from('content_drafts')
-      .select('updated_at, body_html')
+      .select('updated_at, body_html, agent_state, agent_state_at')
       .eq('id', id)
       .maybeSingle();
     if (readError) throw new Error(readError.message);
     if (!current) return { ok: false, reason: 'not_found' };
+    // The page is changing elsewhere: Reload opens it as the agent leaves it.
+    if (agentStateOf(current.agent_state, current.agent_state_at) === 'writing') {
+      return { ok: false, reason: 'conflict' };
+    }
     if ((await bodyHash(current.body_html)) !== base.bodyHash) {
       return { ok: false, reason: 'conflict' };
     }
@@ -1379,6 +1393,56 @@ export async function fixDraftRules(
     return { count: Number(body.count) || 0 };
   } catch (err) {
     console.error('Failed to run the Content Agent:', err);
+    return { error: 'failed' };
+  }
+}
+
+const AGENT_WRITE_ERRORS = [
+  'ai_budget',
+  'no_subscription',
+  'writing',
+  'org_writing',
+  'open_suggestions',
+  'not_draft',
+  'failed',
+] as const;
+export type AgentWriteError = (typeof AGENT_WRITE_ERRORS)[number];
+
+/**
+ * Start's Agent (CE-015): the API's Content Agent does the draft in the
+ * background (content-writer.js) — a new page written whole, an existing
+ * page's suggestions left — and the draft goes to In review. Returns once it
+ * has started. Returned, not thrown: production hides a server action's
+ * errors.
+ */
+export async function startAgentWriting(
+  id: string,
+  brandId: string,
+  request: AgentWriteRequest,
+): Promise<{ started: true } | { error: AgentWriteError }> {
+  if (!draftId.safeParse(id).success || !draftId.safeParse(brandId).success) {
+    return { error: 'failed' };
+  }
+  const supabase = await createClient();
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session) return { error: 'failed' };
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/content-drafts/${id}/write`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ brandId, ...request }),
+    });
+    if (res.ok) return { started: true };
+    const body = (await res.json().catch(() => ({}))) as { code?: string };
+    const code = body.code as AgentWriteError;
+    return { error: AGENT_WRITE_ERRORS.includes(code) ? code : 'failed' };
+  } catch (err) {
+    console.error('Failed to start the Content Agent:', err);
     return { error: 'failed' };
   }
 }
