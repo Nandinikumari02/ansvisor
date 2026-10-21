@@ -31,9 +31,11 @@ interface DraftContent {
  * so and stops saving until it's reloaded. A page over the size limit isn't
  * sent at all.
  *
- * Before a step that reads the saved page (Mark ready), settle() saves what
- * is waiting and waits for a save under way, and throws when the page isn't
- * saved.
+ * Before a step that reads the saved page (Mark ready keeps it in History) or
+ * replaces it (a restore), settle() saves what is waiting and waits for a
+ * save under way, and throws when the page isn't saved; discard() drops what
+ * is waiting once the server's page has replaced it, and saves go on from
+ * that version.
  */
 export function useDraftAutosave(draftId: string, loaded: { updatedAt: string; bodyHtml: string }) {
   const [state, setState] = useState<SaveState>('saved');
@@ -133,6 +135,17 @@ export function useDraftAutosave(draftId: string, loaded: { updatedAt: string; b
     }
   }, [flush]);
 
+  /** Drops what is waiting to save: the server's page replaced it, and saves go on from it. */
+  const discard = useCallback((version: { updatedAt: string; bodyHtml: string }) => {
+    clearTimeout(timer.current);
+    pending.current = null;
+    failed.current = false;
+    stopped.current = false;
+    base.current = { updatedAt: version.updatedAt, bodyHash: null };
+    loadedBody.current = version.bodyHtml;
+    if (!saving.current) setState('saved');
+  }, []);
+
   const unsaved = state !== 'saved';
   useEffect(() => {
     if (!unsaved) return;
@@ -161,5 +174,5 @@ export function useDraftAutosave(draftId: string, loaded: { updatedAt: string; b
     [draftId, baseVersion],
   );
 
-  return { state, schedule, retry: flush, settle };
+  return { state, schedule, retry: flush, settle, discard };
 }

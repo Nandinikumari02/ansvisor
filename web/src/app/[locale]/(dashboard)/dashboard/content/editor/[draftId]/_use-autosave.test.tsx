@@ -37,6 +37,10 @@ function Harness() {
       <button data-big onClick={() => autosave.schedule(content(BIG))} />
       <button data-retry onClick={() => void autosave.retry()} />
       <button
+        data-discard
+        onClick={() => autosave.discard({ updatedAt: 't9', bodyHtml: '<p>restored</p>' })}
+      />
+      <button
         data-settle
         onClick={() =>
           void autosave.settle().then(
@@ -170,6 +174,44 @@ describe('the editor’s autosave', () => {
     edit('<p>last</p>');
     await settle();
     expect(settled()).toBe('unsaved');
+  });
+
+  it('settles after a save under way, then sends what is waiting', async () => {
+    let finish!: () => void;
+    saveContentDraft.mockImplementationOnce(
+      () => new Promise((resolve) => (finish = () => resolve(saved('t1', 'h1')))),
+    );
+    edit('<p>1</p>');
+    await act(async () => vi.advanceTimersByTime(1500));
+    edit('<p>12</p>');
+
+    await settle();
+    expect(settled()).toBe('');
+    await act(async () => finish());
+    await act(async () => vi.advanceTimersByTime(200));
+
+    expect(saveContentDraft).toHaveBeenCalledTimes(2);
+    expect(saveContentDraft).toHaveBeenLastCalledWith('d1', {
+      ...content('<p>12</p>'),
+      base: { updatedAt: 't1', bodyHash: 'h1' },
+    });
+    expect(settled()).toBe('saved');
+    expect(state()).toBe('saved');
+  });
+
+  it('discards what is waiting once the server has the page, and saves go on from it', async () => {
+    edit('<p>x</p>');
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-discard]')!.click());
+    await act(async () => vi.advanceTimersByTime(1500));
+    expect(saveContentDraft).not.toHaveBeenCalled();
+    expect(state()).toBe('saved');
+
+    edit('<p>last</p>');
+    await act(async () => vi.advanceTimersByTime(1500));
+    expect(saveContentDraft).toHaveBeenCalledWith('d1', {
+      ...content('<p>last</p>'),
+      base: { updatedAt: 't9', bodyHash: 'hash:<p>restored</p>' },
+    });
   });
 
   it('asks before leaving the page while something is unsaved', async () => {
