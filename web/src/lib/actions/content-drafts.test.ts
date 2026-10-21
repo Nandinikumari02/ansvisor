@@ -87,6 +87,18 @@ describe('saveContentDraft', () => {
     });
   });
 
+  it('checks the body against the draft allow-list again before saving it', async () => {
+    updated = { updated_at: '2026-10-20T15:00:00Z' };
+    const result = await saveContentDraft(DRAFT, {
+      title: 'Hi',
+      bodyHtml: '<p onclick="steal()">Hi</p><script>alert(1)</script>',
+      base: await base(),
+    });
+    expect(calls[0].value).toEqual({ title: 'Hi', body_html: '<p>Hi</p>' });
+    // The fingerprint is of the page as stored.
+    expect(result).toMatchObject({ ok: true, bodyHash: await bodyHash('<p>Hi</p>') });
+  });
+
   it('goes over a change to the draft’s other columns, the page being the same', async () => {
     // Marked ready meanwhile: a newer updated_at, the page as the editor saw it.
     updates = [null, { updated_at: '2026-10-20T15:01:00Z' }];

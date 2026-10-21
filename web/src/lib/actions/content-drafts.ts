@@ -16,6 +16,7 @@ import {
   bodyHash,
   type SaveDraftResult,
 } from '@/lib/content/editor';
+import { sanitizeDraftHtml } from '@/lib/content/sanitize-draft-html';
 
 /**
  * Content drafts (Content Editor, CE-002), read through the signed-in member's
@@ -129,10 +130,11 @@ const saveInput = z.object({
 const SAVE_ATTEMPTS = 3;
 
 /**
- * The editor's autosave: the body and the title read from it, written only
- * over the version the editor last saw (`base`). When another write came
- * first, the page tells which kind: the same page means only the draft's
- * other columns changed (Mark ready, its type), and the save goes over them;
+ * The editor's autosave: the body, checked against the draft allow-list
+ * again (sanitizeDraftHtml), and the title read from it, written only over
+ * the version the editor last saw (`base`). When another write came first,
+ * the page tells which kind: the same page means only the draft's other
+ * columns changed (Mark ready, its type), and the save goes over them;
  * another page means someone else changed it (another tab, a teammate, the
  * Content Agent), and nothing is overwritten. A save RLS refused, or of a
  * draft that no longer exists, comes back not_found rather than saved.
@@ -146,7 +148,8 @@ export async function saveContentDraft(
   }
   const parsed = saveInput.safeParse(input);
   if (!draftId.safeParse(id).success || !parsed.success) return { ok: false, reason: 'invalid' };
-  const { title, bodyHtml, base } = parsed.data;
+  const { title, base } = parsed.data;
+  const bodyHtml = sanitizeDraftHtml(parsed.data.bodyHtml);
   const supabase = await createClient();
   let expected = base.updatedAt;
   for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt++) {
