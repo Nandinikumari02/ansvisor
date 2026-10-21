@@ -47,6 +47,7 @@ import {
   type DraftMethod,
   type DraftSource,
   type DraftStartOptions,
+  type OverlapPage,
   type PageImportError,
   type PageType,
 } from '@/lib/content/drafts';
@@ -112,6 +113,14 @@ interface StartChoice {
   choice: OverlapChoice;
 }
 
+/**
+ * What the dialog opens on, from the Content plan (CE-014): an opportunity
+ * (for an existing page, Start optimizes that page), or a page to read.
+ */
+export type DialogPreset =
+  | { kind: 'opportunity'; id: string; page?: { url: string; title: string | null } | null }
+  | { kind: 'page'; url: string };
+
 /** Who does the page (Start, CE-015): the person, the Content Agent, or the team. */
 type Who = 'me' | 'agent' | 'team';
 const WHO: Who[] = ['me', 'agent', 'team'];
@@ -135,6 +144,7 @@ export function NewContentDialog({
   brandId,
   siteType,
   onSent,
+  preset = null,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -142,6 +152,11 @@ export function NewContentDialog({
   siteType: SiteType;
   /** A draft was sent to the Action Center: the Library lists it. */
   onSent?: () => void;
+  /**
+   * What the Content plan (CE-014) opens it on: Start for an opportunity, or
+   * an existing page read to optimize.
+   */
+  preset?: DialogPreset | null;
 }) {
   const t = useTranslations('contentEditor.newContent');
   const tTypes = useTranslations('contentEditor.pageTypes');
@@ -187,6 +202,48 @@ export function NewContentDialog({
     };
   }, [open, brandId, attempt]);
 
+  // From the Content plan: Start for its opportunity once the options are in
+  // (one no longer open is left to pick), or its page read to optimize.
+  const presetApplied = useRef(false);
+  // The plan named the page to optimize: the overlap check doesn't replace it.
+  const choiceGiven = useRef(false);
+  useEffect(() => {
+    if (!open || !preset || presetApplied.current) return;
+    if (preset.kind === 'page') {
+      presetApplied.current = true;
+      setMethod('optimize');
+      setFrom('url');
+      setPageUrl(preset.url);
+      void readPage(preset.url);
+      return;
+    }
+    if (!options) return;
+    presetApplied.current = true;
+    const opportunity = options.opportunities.find((o) => o.id === preset.id);
+    if (!opportunity) return;
+    const item = {
+      value: opportunity.id,
+      label: opportunity.title,
+      pageTitle: opportunity.pageTitle ?? undefined,
+    };
+    setKind('opportunity');
+    setPicked(item);
+    startFrom(
+      item,
+      'opportunity',
+      preset.page
+        ? {
+            url: preset.page.url,
+            title: preset.page.title,
+            promptsInCommon: 0,
+            citations: 0,
+            gscPosition: null,
+          }
+        : undefined,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per opening
+  }, [open, preset, options]);
+
   // Start checks the pages that already answer a new page's prompts. Content
   // brought to optimize has no prompts to check. A page type picked in Start
   // keeps the same source, so the check runs once per source.
@@ -200,9 +257,11 @@ export function NewContentDialog({
       .then((overlap) => {
         if (cancelled) return;
         setOverlapRead({ key, overlap, failed: false });
-        // The recommended option is picked first.
+        // The recommended option is picked first, unless the plan named the page.
         const recommended = adviseOverlap(overlap).options[0];
-        if (recommended) setStart((s) => (s ? withChoice(s, recommended.choice, siteType) : s));
+        if (recommended && !choiceGiven.current) {
+          setStart((s) => (s ? withChoice(s, recommended.choice, siteType) : s));
+        }
       })
       .catch((err) => {
         console.error('Failed to check for overlapping pages:', err);
@@ -214,6 +273,8 @@ export function NewContentDialog({
   }, [brandId, startSource, siteType, overlapAttempt]);
 
   const reset = () => {
+    presetApplied.current = false;
+    choiceGiven.current = false;
     setMethod('create');
     setKind('opportunity');
     setPicked(null);
@@ -263,8 +324,7 @@ export function NewContentDialog({
   };
 
   /** A page of the brand's, read by its URL and cleaned like a paste. */
-  const readPage = async () => {
-    const address = pageUrl.trim();
+  const readPage = async (address = pageUrl.trim()) => {
     if (!address) return;
     setReading(true);
     setUrlError(null);
@@ -317,24 +377,34 @@ export function NewContentDialog({
   const canContinue =
     method === 'create' ? picked !== null : content !== null || (from === 'paste' && !!typed);
 
+  /**
+   * Start for a new page from what was picked: its title, and the page type
+   * it reads as. With a page (an opportunity for an existing page, from the
+   * plan), Start optimizes that page, and the overlap check leaves it chosen.
+   */
+  const startFrom = (item: PickerItem, from: SourceKind, page?: OverlapPage) => {
+    const title = item.pageTitle ?? item.label;
+    const type = startPageType({ title }, siteType);
+    const newPageType = {
+      pageType: type.pageType,
+      detectedFrom: type.detected ? ('title' as const) : null,
+      picked: false,
+    };
+    const next: StartChoice = {
+      method: 'create',
+      title,
+      source: { kind: from, id: item.value },
+      ...newPageType,
+      newPageType,
+      choice: { kind: 'create' },
+    };
+    choiceGiven.current = !!page;
+    setStart(page ? withChoice(next, { kind: 'optimize', page }, siteType) : next);
+  };
+
   const toStart = () => {
     if (method === 'create') {
-      if (!picked) return;
-      const title = picked.pageTitle ?? picked.label;
-      const type = startPageType({ title }, siteType);
-      const newPageType = {
-        pageType: type.pageType,
-        detectedFrom: type.detected ? ('title' as const) : null,
-        picked: false,
-      };
-      setStart({
-        method,
-        title,
-        source: { kind, id: picked.value },
-        ...newPageType,
-        newPageType,
-        choice: { kind: 'create' },
-      });
+      if (picked) startFrom(picked, kind);
       return;
     }
     const brought =
