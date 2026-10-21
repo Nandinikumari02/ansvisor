@@ -3,10 +3,10 @@ import {
   ALLOWED_ATTRIBUTES,
   ALLOWED_TAGS,
   DEMOTED_HEADINGS,
-  JSON_LD_SLOT,
+  KEPT_SLOT,
   cleanHref,
-  extractJsonLd,
-  restoreJsonLd,
+  extractKeptBlocks,
+  restoreKeptBlocks,
 } from './html-allowlist';
 
 /**
@@ -15,18 +15,19 @@ import {
  * editor sends clean HTML already; this keeps a save made without it to the
  * same allow-list, so the save action never stores a script, an event
  * handler or a javascript: link. Schema JSON-LD stays, written again from
- * its JSON.
+ * its JSON, and HTML blocks stay as their encoded code, checked to decode
+ * and fit.
  *
  * Stored HTML is still untrusted: a member can also write
  * content_drafts.body_html straight through PostgREST (the update policy in
  * 00204), past this check. Whatever reads it parses it through the editor's
- * schema or cleans it again; nothing renders or hands it on raw.
+ * schema or cleans it again before showing it or handing it on.
  */
 export function sanitizeDraftHtml(html: string): string {
-  const { html: withSlots, blocks } = extractJsonLd(html);
+  const { html: withSlots, kept } = extractKeptBlocks(html, { htmlBlocks: true });
   const clean = sanitizeHtml(withSlots, {
-    allowedTags: [...ALLOWED_TAGS, JSON_LD_SLOT],
-    allowedAttributes: { ...ALLOWED_ATTRIBUTES, [JSON_LD_SLOT]: ['data-i'] },
+    allowedTags: [...ALLOWED_TAGS, KEPT_SLOT],
+    allowedAttributes: { ...ALLOWED_ATTRIBUTES, [KEPT_SLOT]: ['data-i'] },
     allowedSchemes: ['http', 'https', 'mailto'],
     allowedSchemesByTag: { img: ['http', 'https'] },
     allowProtocolRelative: false,
@@ -41,5 +42,5 @@ export function sanitizeDraftHtml(html: string): string {
     // An image whose address was refused is no image at all.
     exclusiveFilter: (frame) => frame.tag === 'img' && !frame.attribs.src,
   });
-  return restoreJsonLd(clean, blocks);
+  return restoreKeptBlocks(clean, kept);
 }

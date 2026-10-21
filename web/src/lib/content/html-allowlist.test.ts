@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   cleanHref,
-  extractJsonLd,
+  decodeHtmlBlock,
+  encodeHtmlBlock,
+  extractKeptBlocks,
+  htmlBlockElement,
   jsonLdType,
   normalizeJsonLd,
-  restoreJsonLd,
+  restoreKeptBlocks,
 } from './html-allowlist';
 
 describe('cleanHref', () => {
@@ -45,39 +48,53 @@ describe('normalizeJsonLd', () => {
   });
 });
 
-describe('extractJsonLd and restoreJsonLd', () => {
+describe('extractKeptBlocks and restoreKeptBlocks', () => {
   it('keeps valid schema blocks through cleaning, as script elements of our own', () => {
-    const { html, blocks } = extractJsonLd(
+    const { html, kept } = extractKeptBlocks(
       '<p>a</p><script type="application/ld+json" onload="x()">{"@type":"Product"}</script>' +
         "<script type='application/ld+json'>not json</script><script>alert(1)</script>",
+      { htmlBlocks: false },
     );
-    expect(blocks).toEqual(['{"@type":"Product"}']);
-    expect(html).toBe('<p>a</p><jsonld-slot data-i="0"></jsonld-slot><script>alert(1)</script>');
-    expect(restoreJsonLd('<p>a</p><jsonld-slot data-i="0"></jsonld-slot>', blocks)).toBe(
+    expect(kept).toEqual(['<script type="application/ld+json">{"@type":"Product"}</script>']);
+    expect(html).toBe('<p>a</p><kept-slot data-i="0"></kept-slot><script>alert(1)</script>');
+    expect(restoreKeptBlocks('<p>a</p><kept-slot data-i="0"></kept-slot>', kept)).toBe(
       '<p>a</p><script type="application/ld+json">{"@type":"Product"}</script>',
     );
   });
 
+  it('keeps HTML blocks only where they’re allowed, and only ones that decode and fit', () => {
+    const block = htmlBlockElement('<iframe src="https://youtube.com/embed/x"></iframe>');
+    const tooLong = htmlBlockElement('x'.repeat(50_001));
+    const input = `<p>a</p>${block}<div data-html-block="!!"></div>${tooLong}`;
+    expect(extractKeptBlocks(input, { htmlBlocks: true })).toEqual({
+      html: '<p>a</p><kept-slot data-i="0"></kept-slot><div data-html-block="!!"></div>',
+      kept: [block],
+    });
+    expect(extractKeptBlocks(input, { htmlBlocks: false }).kept).toEqual([]);
+  });
+
   it('reads tags in any case, and skips other tags and plain scripts', () => {
-    const { html, blocks } = extractJsonLd(
+    const { html, kept } = extractKeptBlocks(
       '<SCRIPT TYPE="Application/LD+JSON">{"@type":"Product"}</SCRIPT>' +
         '<scripts type="application/ld+json">{}</scripts>' +
         '<script>var s = "<script type=application/ld+json>{}";</script><p>b</p>',
+      { htmlBlocks: false },
     );
-    expect(blocks).toEqual(['{"@type":"Product"}']);
+    expect(kept).toEqual(['<script type="application/ld+json">{"@type":"Product"}</script>']);
     expect(html).toBe(
-      '<jsonld-slot data-i="0"></jsonld-slot><scripts type="application/ld+json">{}</scripts>' +
+      '<kept-slot data-i="0"></kept-slot><scripts type="application/ld+json">{}</scripts>' +
         '<script>var s = "<script type=application/ld+json>{}";</script><p>b</p>',
     );
   });
 
   it('finds a block after letters whose lower case is longer, as Turkish İ', () => {
-    const { html, blocks } = extractJsonLd(
+    const { html, kept } = extractKeptBlocks(
       '<h1>İstanbul İçin İyi Kahve</h1><script type="application/ld+json">{"@type":"Product"}</script><p>Sonra.</p>',
+      { htmlBlocks: false },
     );
-    expect(blocks).toEqual(['{"@type":"Product"}']);
+    expect(kept).toEqual(['<script type="application/ld+json">{"@type":"Product"}</script>']);
     expect(html).toBe(
-      '<h1>İstanbul İçin İyi Kahve</h1><jsonld-slot data-i="0"></jsonld-slot><p>Sonra.</p>',
+      '<h1>İstanbul İçin İyi Kahve</h1><kept-slot data-i="0"></kept-slot><p>Sonra.</p>',
     );
   });
 
@@ -87,14 +104,28 @@ describe('extractJsonLd and restoreJsonLd', () => {
     for (const input of [unclosed, unended]) {
       expect(input.length).toBeGreaterThan(450_000);
       const started = performance.now();
-      const { html, blocks } = extractJsonLd(input);
+      const { html, kept } = extractKeptBlocks(input, { htmlBlocks: true });
       expect(performance.now() - started).toBeLessThan(500);
-      expect(blocks).toEqual([]);
+      expect(kept).toEqual([]);
       expect(html).toBe(input);
     }
   });
 
   it('fills a slot nobody kept with nothing', () => {
-    expect(restoreJsonLd('<jsonld-slot data-i="7"></jsonld-slot><p>a</p>', [])).toBe('<p>a</p>');
+    expect(restoreKeptBlocks('<kept-slot data-i="7"></kept-slot><p>a</p>', [])).toBe('<p>a</p>');
+  });
+});
+
+describe('HTML block code', () => {
+  it('round-trips any code, Unicode included, as base64 that holds no markup', () => {
+    const code = '<script>alert("ğüş")</script>\n<style>p{color:red}</style> &amp; "quotes"';
+    const encoded = encodeHtmlBlock(code);
+    expect(encoded).toMatch(/^[A-Za-z0-9+/]+=*$/);
+    expect(decodeHtmlBlock(encoded)).toBe(code);
+  });
+
+  it('refuses what isn’t base64, or isn’t UTF-8', () => {
+    expect(decodeHtmlBlock('<script>')).toBeNull();
+    expect(decodeHtmlBlock(btoa('\xff\xfe'))).toBeNull();
   });
 });
