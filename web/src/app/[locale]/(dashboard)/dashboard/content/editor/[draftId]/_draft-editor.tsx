@@ -25,6 +25,7 @@ import { PLATFORM_LABELS } from '@/config/platform-labels';
 import { DraftMethodBadge, DraftStatusBadge } from '@/components/content/draft-badges';
 import {
   decideDraftSuggestions,
+  fixDraftRules,
   getCitedPassages,
   getDraftSuggestions,
   keepAgentBeforeVersion,
@@ -45,6 +46,7 @@ import {
 import { PAGE_READ_DELAY_MS, draftTitleFromDoc, safeLinkHref } from '@/lib/content/editor';
 import { JsonLd } from '@/lib/content/json-ld-node';
 import { detectPageType } from '@/lib/content/page-types';
+import { aiTracesFound } from '@/lib/content/rules';
 import { cn } from '@/lib/utils';
 import { AgentBar } from './_agent-bar';
 import { DropOverlay, useAttachments } from './_attach';
@@ -59,6 +61,7 @@ import {
 import { HistoryMenu } from './_history-menu';
 import { HtmlBlock, copyToClipboard } from './_html-block';
 import { PageTypeMenu } from './_page-type-menu';
+import { ruleStatusText, type AgentFix } from './_rules-tab';
 import { EditorSidePanel, useSidePanelOpen } from './_side-panel';
 import {
   AgentSuggestions,
@@ -115,7 +118,8 @@ const DOCUMENT_CLASS = cn(
  * imported live page, each Mark ready) and restores any of them; passages
  * AI answers quote today are locked: marked, and changed only after a
  * warning; an agent's suggestions sit in the page as cards to accept or
- * reject, with the agent bar over it (CE-018).
+ * reject, with the agent bar over it, and Fix open rules with agent asks the
+ * Content Agent for a new batch (CE-018).
  */
 export function DraftEditor({ draft }: { draft: ContentDraft }) {
   const t = useTranslations('contentEditor.editor');
@@ -134,11 +138,17 @@ export function DraftEditor({ draft }: { draft: ContentDraft }) {
   // What quotes each locked passage, for the warning: "ChatGPT 14× and …".
   const citedBy = useRef(new Map<string, string>());
   const [citedCount, setCitedCount] = useState(0);
+  // Whether the locked passages have been read: until then the agent would
+  // be told none are locked (a new page has none to read).
+  const [citedRead, setCitedRead] = useState(!draft.sourceUrl);
   // An agent's suggestions (CE-018): its latest batch, with what was decided.
   const [suggestions, setSuggestions] = useState<DraftSuggestion[]>([]);
   const suggestionsNow = useRef(suggestions);
   const [deciding, setDeciding] = useState(false);
   const [barClosed, setBarClosed] = useState(false);
+  const [fixing, setFixing] = useState(false);
+  const tRules = useTranslations('contentEditor.editor.rules');
+  const tStatus = useTranslations('contentEditor.editor.rules.status');
   // History keeps the page before the first suggestion accepted here.
   const agentBeforeKept = useRef(false);
   const onDecide = useRef<(id: string, decision: SuggestionDecision) => void>(() => {});
@@ -285,6 +295,7 @@ export function DraftEditor({ draft }: { draft: ContentDraft }) {
   // read when it opens, and again after a restore.
   const loadCited = useCallback(async () => {
     if (!editor || !draft.sourceUrl) return;
+    setCitedRead(false);
     const texts = new Set<string>();
     editor.state.doc.descendants((node) => {
       if (!node.isTextblock) return true;
@@ -306,6 +317,9 @@ export function DraftEditor({ draft }: { draft: ContentDraft }) {
       );
     } catch (err) {
       console.error('Failed to read the cited passages:', err);
+    } finally {
+      // Read or not, the editor's locks are what the agent is told.
+      if (!editor.isDestroyed) setCitedRead(true);
     }
   }, [editor, draft.id, draft.sourceUrl, quotedBy, t]);
 
@@ -453,6 +467,86 @@ export function DraftEditor({ draft }: { draft: ContentDraft }) {
     }
   };
   const openSuggestions = suggestions.filter((s) => s.status === 'open').length;
+
+  /**
+   * Fix open rules with agent: the page as it is now is saved, then the
+   * Content Agent reads it with the rules still open (or only the ones
+   * named), the person's own rules and the locked passages, and leaves a new
+   * batch of suggestions for review.
+   */
+  const fixRules = async (only?: string[]) => {
+    if (!editor || fixing || !citedRead) return;
+    if (openSuggestions > 0) {
+      toast(t('suggestions.decideFirst'));
+      return;
+    }
+    const open = rules.rules.filter(
+      ({ rule, status }) => rule.on && status.state === 'bad' && (!only || only.includes(rule.key)),
+    );
+    if (open.length === 0) return;
+    const pageText = editor.getText({ blockSeparator: '\n' });
+    const request = {
+      rules: open.map(({ rule, status }) => ({
+        key: rule.key,
+        name: tRules(`names.${rule.key}`),
+        detail: [
+          rule.current
+            ? `${tRules('agent.aim')}: ${rule.current}${rule.unit ? ` ${tRules(`units.${rule.unit}`)}` : ''}`
+            : null,
+          `${tRules('agent.now')}: ${ruleStatusText(tStatus, status)}`,
+          rule.key === 'aiTraces'
+            ? `${tRules('agent.phrases')}: ${aiTracesFound(pageText).join(', ')}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      })),
+      textRules: rules.textRules.filter(({ rule }) => rule.on).map(({ rule }) => rule.text),
+      locked: (() => {
+        const locks = citedLocks(editor.state);
+        return [...locks.labels.keys()].filter((key) => !locks.unlocked.has(key));
+      })(),
+    };
+    setFixing(true);
+    try {
+      // The agent reads the page as saved.
+      await autosave.settle();
+      const result = await fixDraftRules(draft.id, draft.brandId, request);
+      if ('error' in result) {
+        toast.error(t(`suggestions.fixErrors.${result.error}`));
+        // Another tab (or the API) left them: show them here to decide.
+        if (result.error === 'open_suggestions') {
+          setSuggestions(await getDraftSuggestions(draft.id));
+          setBarClosed(false);
+        }
+        return;
+      }
+      if (result.count === 0) {
+        toast(t('suggestions.nothingToFix'));
+        return;
+      }
+      setSuggestions(await getDraftSuggestions(draft.id));
+      setBarClosed(false);
+      // A new batch: History keeps the page again before its first change.
+      agentBeforeKept.current = false;
+      toast.success(t('suggestions.fixed', { count: result.count }));
+    } catch (err) {
+      console.error('Failed to run the Content Agent:', err);
+      toast.error(t('suggestions.fixErrors.failed'));
+    } finally {
+      setFixing(false);
+    }
+  };
+  const agentFix: AgentFix = {
+    run: (only) => void fixRules(only),
+    running: fixing,
+    blocked:
+      openSuggestions > 0
+        ? t('suggestions.decideFirst')
+        : !citedRead
+          ? t('suggestions.citedLoading')
+          : null,
+  };
 
   // A drag with files over the page shows where they go; one dropped beside
   // the page (not on its text) goes in at the cursor.
@@ -749,6 +843,8 @@ export function DraftEditor({ draft }: { draft: ContentDraft }) {
                 )
               }
               onClose={() => setBarClosed(true)}
+              onFixRules={() => void fixRules()}
+              fixing={fixing}
             />
           )}
           {editor && (
@@ -809,6 +905,7 @@ export function DraftEditor({ draft }: { draft: ContentDraft }) {
             rules={rules}
             reads={reads}
             tabRequest={tabRequest}
+            agentFix={agentFix}
           />
         )}
       </div>

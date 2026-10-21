@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useTranslations } from 'next-intl';
+import { Bot, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -56,14 +57,25 @@ const HINTED = new Set([
  * ("Your text rules"); Save as my rules keeps the set for the workspace's
  * drafts of the type, and Reset goes back to Ansvisor's default.
  */
+/** Fix open rules with agent (CE-018), as the editor runs it. */
+export interface AgentFix {
+  /** Runs the agent on the open rules, or only on the ones named. */
+  run: (only?: string[]) => void;
+  running: boolean;
+  /** Why it can't run now (suggestions still open), or null. */
+  blocked: string | null;
+}
+
 export function RulesTab({
   state,
   siteType,
   draftPageType,
+  agentFix,
 }: {
   state: DraftRulesState;
   siteType: SiteType;
   draftPageType: PageType | null;
+  agentFix?: AgentFix;
 }) {
   const t = useTranslations('contentEditor.editor.rules');
   const tTypes = useTranslations('contentEditor.pageTypes');
@@ -123,6 +135,23 @@ export function RulesTab({
         <p className="text-xs text-muted-foreground" role="status">
           {t('met', { met: state.met, total: state.total })}
         </p>
+        {agentFix && state.met < state.total && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="w-full"
+            disabled={agentFix.running || agentFix.blocked !== null}
+            title={agentFix.blocked ?? t('agentFixHint')}
+            onClick={() => agentFix.run()}
+          >
+            {agentFix.running ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Bot className="h-3.5 w-3.5" />
+            )}
+            {agentFix.running ? t('agentFixing') : t('agentFix')}
+          </Button>
+        )}
       </div>
 
       {RULE_GROUPS.map((group) => {
@@ -142,6 +171,7 @@ export function RulesTab({
                   rule={rule}
                   status={status}
                   onChange={(change) => state.change(rule.key, change)}
+                  agentFix={rule.key === 'aiTraces' ? agentFix : undefined}
                 />
               ))}
             </ul>
@@ -318,10 +348,13 @@ function RuleRow({
   rule,
   status,
   onChange,
+  agentFix,
 }: {
   rule: ActiveRule;
   status: RuleStatus;
   onChange: (change: { on?: boolean; value?: string }) => void;
+  /** "Remove AI traces" offers Fix: the agent rewrites only those phrases. */
+  agentFix?: AgentFix;
 }) {
   const t = useTranslations('contentEditor.editor.rules');
   const name = t(`names.${rule.key}`);
@@ -340,6 +373,17 @@ function RuleRow({
           {name}
         </span>
         <StatusBadge on={rule.on} status={status} />
+        {agentFix && rule.on && status.state === 'bad' && (
+          <button
+            type="button"
+            disabled={agentFix.running || agentFix.blocked !== null}
+            title={agentFix.blocked ?? t('fixTraceHint')}
+            onClick={() => agentFix.run([rule.key])}
+            className="shrink-0 text-[11px] font-medium underline underline-offset-2 hover:no-underline disabled:opacity-50"
+          >
+            {t('fixTrace')}
+          </button>
+        )}
       </div>
       {rule.kind !== 'switch' && (
         <div className="mt-1 flex items-center gap-1 pl-9">
@@ -410,6 +454,18 @@ function RuleValue({
   );
 }
 
+/** How a rule reads now, as its badge says it ("✓", "3 found", "Missing"). */
+export function ruleStatusText(
+  t: (key: string, values?: Record<string, number>) => string,
+  status: RuleStatus,
+): string {
+  if (status.state === 'ok') return '✓';
+  if (status.code === 'partOf') return t('partOf', { count: status.count, of: status.of });
+  if (status.code === 'current') return formatNumber(status.count);
+  if ('count' in status) return t(status.code, { count: status.count });
+  return t(status.code);
+}
+
 function StatusBadge({ on, status }: { on: boolean; status: RuleStatus }) {
   const t = useTranslations('contentEditor.editor.rules.status');
   if (!on) {
@@ -417,12 +473,7 @@ function StatusBadge({ on, status }: { on: boolean; status: RuleStatus }) {
       <span className="w-20 shrink-0 text-right text-[11px] text-muted-foreground">{t('off')}</span>
     );
   }
-  let text: string;
-  if (status.state === 'ok') text = '✓';
-  else if (status.code === 'partOf') text = t('partOf', { count: status.count, of: status.of });
-  else if (status.code === 'current') text = formatNumber(status.count);
-  else if ('count' in status) text = t(status.code, { count: status.count });
-  else text = t(status.code);
+  const text = ruleStatusText(t, status);
   return (
     <span
       className={cn(

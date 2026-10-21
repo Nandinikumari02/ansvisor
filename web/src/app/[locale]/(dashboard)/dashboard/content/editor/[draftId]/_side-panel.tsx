@@ -6,7 +6,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { isPageType, type ContentDraft } from '@/lib/content/drafts';
 import { BriefTab } from './_brief-tab';
 import { ImpactTab } from './_impact-tab';
-import { RulesTab } from './_rules-tab';
+import { RulesTab, type AgentFix } from './_rules-tab';
 import { SourcesTab } from './_sources-tab';
 import { useBriefRebuild, type PageNow } from './_use-brief-rebuild';
 import type { DraftReads } from './_use-draft-reads';
@@ -64,6 +64,7 @@ export function EditorSidePanel({
   rules,
   reads,
   tabRequest,
+  agentFix,
 }: {
   draft: ContentDraft;
   /** The draft's title, page and type as written now: Sources and Brief read them. */
@@ -76,6 +77,8 @@ export function EditorSidePanel({
   reads: DraftReads;
   /** A tab to open, from outside the panel (the header's rules chip). */
   tabRequest: { tab: PanelTab; n: number } | null;
+  /** Fix open rules with agent, for the Rules tab (CE-018). */
+  agentFix?: AgentFix;
 }) {
   const t = useTranslations('contentEditor.editor.panel');
   const [tab, setTab] = useState<PanelTab>('impact');
@@ -171,6 +174,7 @@ export function EditorSidePanel({
         {opened.has('rules') && (
           <div hidden={tab !== 'rules'}>
             <RulesTab
+              agentFix={agentFix}
               state={rules}
               siteType={draft.siteType}
               draftPageType={isPageType(pageType) ? pageType : null}

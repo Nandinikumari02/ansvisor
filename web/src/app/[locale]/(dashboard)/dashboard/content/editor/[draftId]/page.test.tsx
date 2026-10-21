@@ -7,7 +7,7 @@ import type { Editor } from '@tiptap/core';
 import { RoleProvider } from '@/components/providers/role-provider';
 import type { ContentDraft } from '@/lib/content/drafts';
 import type { DraftSuggestion } from '@/lib/content/suggestions';
-import { passageKey } from '@/lib/content/cited-passages';
+import { passageKey, type CitedPassage } from '@/lib/content/cited-passages';
 import ContentEditorPage from './page';
 
 const getContentDraft = vi.fn();
@@ -28,7 +28,9 @@ const getCitedPassages = vi.fn();
 const getDraftSuggestions = vi.fn();
 const decideDraftSuggestions = vi.fn();
 const keepAgentBeforeVersion = vi.fn();
+const fixDraftRules = vi.fn();
 vi.mock('@/lib/actions/content-drafts', () => ({
+  fixDraftRules: (...args: unknown[]) => fixDraftRules(...args),
   getDraftSuggestions: (...args: unknown[]) => getDraftSuggestions(...args),
   decideDraftSuggestions: (...args: unknown[]) => decideDraftSuggestions(...args),
   keepAgentBeforeVersion: (...args: unknown[]) => keepAgentBeforeVersion(...args),
@@ -187,6 +189,7 @@ beforeEach(() => {
   getDraftSuggestions.mockReset().mockResolvedValue([]);
   decideDraftSuggestions.mockReset().mockResolvedValue(1);
   keepAgentBeforeVersion.mockReset().mockResolvedValue(undefined);
+  fixDraftRules.mockReset().mockResolvedValue({ count: 0 });
   localStorage.clear();
   brandState.activeBrandId = 'b1';
   brandState.setActiveBrand.mockReset();
@@ -1253,6 +1256,136 @@ describe('the side panel', () => {
     });
     expect(chip.getAttribute('aria-label')).toBe(`Rules ${met - 1}/${total - 1}`);
     expect(toast).toHaveBeenCalledWith('Rule updated for this draft');
+  });
+
+  describe('Fix open rules with agent', () => {
+    const traced = draft({
+      pageType: 'blog_post',
+      bodyHtml: '<h1>Pipeline forecasting</h1><p>We delve into how teams forecast.</p>',
+    });
+    const agentSuggestion = {
+      id: 'n1',
+      batchId: 'b2',
+      actionId: null,
+      actionNo: null,
+      kind: 'replace' as const,
+      blockText: 'We delve into how teams forecast.',
+      beforeText: 'delve into',
+      afterText: 'look at',
+      reason: 'remove an AI trace (rule)',
+      ruleKeys: ['aiTraces'],
+      status: 'open' as const,
+    };
+    /** Opens the Rules tab from the header's chip. */
+    async function openRules() {
+      window.innerWidth = 1024;
+      await renderPage();
+      const chip = container.querySelector<HTMLButtonElement>(
+        'header button[aria-label^="Rules "]',
+      )!;
+      await act(async () => chip.click());
+    }
+    const panelButton = (label: string) =>
+      [...panel()!.querySelectorAll<HTMLButtonElement>('button')].find(
+        (b) => b.textContent === label,
+      )!;
+
+    it('sends the open rules and leaves the agent’s batch for review', async () => {
+      getContentDraft.mockResolvedValue(traced);
+      getDraftSuggestions.mockResolvedValueOnce([]).mockResolvedValueOnce([agentSuggestion]);
+      fixDraftRules.mockResolvedValue({ count: 1 });
+      await openRules();
+
+      await act(async () => panelButton('Fix open rules with agent').click());
+      await act(async () => {});
+
+      const [id, brandId, request] = fixDraftRules.mock.calls[0];
+      expect([id, brandId]).toEqual(['d1', 'b1']);
+      expect(request.rules).toContainEqual({
+        key: 'aiTraces',
+        name: 'Remove AI traces (humanize)',
+        detail: 'now: 1 found · phrases found: delve',
+      });
+      expect(request.rules.every((r: { key: string }) => r.key !== 'sentence')).toBe(true);
+      expect(request).toMatchObject({ textRules: [], locked: [] });
+      expect(
+        container.querySelector('[role="region"][aria-label="Agent suggestions"]')!.textContent,
+      ).toContain('Content Agent suggested 1 change');
+      expect(toast.success).toHaveBeenCalledWith(
+        'Content Agent suggested 1 change · review them in the page',
+      );
+    });
+
+    it('fixes only the AI traces from their rule', async () => {
+      getContentDraft.mockResolvedValue(traced);
+      await openRules();
+
+      await act(async () => panelButton('Fix').click());
+      await act(async () => {});
+
+      expect(fixDraftRules.mock.calls[0][2].rules.map((r: { key: string }) => r.key)).toEqual([
+        'aiTraces',
+      ]);
+      expect(toast).toHaveBeenCalledWith(
+        'Content Agent found nothing it could change without new facts.',
+      );
+    });
+
+    it('says when the AI usage is spent', async () => {
+      getContentDraft.mockResolvedValue(traced);
+      fixDraftRules.mockResolvedValue({ error: 'ai_budget' });
+      await openRules();
+
+      await act(async () => panelButton('Fix open rules with agent').click());
+      await act(async () => {});
+      expect(toast.error).toHaveBeenCalledWith(
+        "This month's AI usage is spent. Upgrade for more, or try again next month.",
+      );
+    });
+
+    it('waits until the open suggestions are decided', async () => {
+      getContentDraft.mockResolvedValue(traced);
+      getDraftSuggestions.mockResolvedValue([agentSuggestion]);
+      await openRules();
+
+      const fix = panelButton('Fix open rules with agent');
+      expect(fix.disabled).toBe(true);
+      expect(fix.title).toBe('Accept or reject the open suggestions first.');
+    });
+
+    it('waits until the passages AI quotes are read, so they go to the agent locked', async () => {
+      getContentDraft.mockResolvedValue({
+        ...traced,
+        sourceUrl: 'https://acme.example/forecasting',
+      });
+      let read: (cited: CitedPassage[]) => void = () => {};
+      getCitedPassages.mockReturnValue(new Promise((resolve) => (read = resolve)));
+      await openRules();
+
+      const fix = () => panelButton('Fix open rules with agent');
+      expect(fix().disabled).toBe(true);
+      expect(fix().title).toBe(
+        'Reading which passages AI quotes, so the agent leaves them as they are…',
+      );
+      await act(async () => read([]));
+      expect(fix().disabled).toBe(false);
+    });
+
+    it('shows the open suggestions another tab left, when the agent is refused for them', async () => {
+      getContentDraft.mockResolvedValue(traced);
+      getDraftSuggestions.mockResolvedValueOnce([]).mockResolvedValueOnce([agentSuggestion]);
+      fixDraftRules.mockResolvedValue({ error: 'open_suggestions' });
+      await openRules();
+
+      await act(async () => panelButton('Fix open rules with agent').click());
+      await act(async () => {});
+      expect(toast.error).toHaveBeenCalledWith(
+        "This page has open suggestions, maybe from another tab. They're shown now: accept or reject them first.",
+      );
+      expect(
+        container.querySelector('[role="region"][aria-label="Agent suggestions"]')!.textContent,
+      ).toContain('Content Agent suggested 1 change');
+    });
   });
 
   it('starts a draft from the workspace’s My rules, and saves a draft’s set as them', async () => {
