@@ -28,6 +28,7 @@ vi.mock('@/lib/supabase/admin', () => ({
         select: () => chain,
         eq: (col: string, v: unknown) => (db.filters.push([table, col, v]), chain),
         in: () => chain,
+        is: (col: string, v: unknown) => (db.filters.push([table, col, v]), chain),
         order: () => chain,
         limit: () => chain,
         insert: (value: unknown) => (db.writes.push({ table, op: 'insert', value }), chain),
@@ -258,8 +259,10 @@ describe('suggestContentChangesFor', () => {
 });
 
 describe('setContentDraftReadyFor', () => {
-  it('marks a draft ready and keeps the version, once', async () => {
+  it('marks a draft ready, keeps the version and completes its action’s task, once', async () => {
     db.rows.content_drafts = draftRow({ status: 'draft' });
+    db.rows.actions = { payload: {} };
+    db.rows.action_tasks = [{ id: 't-optimize', status: 'in_progress' }];
     // The update reads back the same row; its status is what the update set.
     const result = await setContentDraftReadyFor(auth, 'd1');
     expect(db.writes).toContainEqual({
@@ -268,7 +271,17 @@ describe('setContentDraftReadyFor', () => {
       value: { status: 'ready' },
     });
     expect(db.filters).toContainEqual(['content_drafts', 'status', 'draft']);
-    expect(result).toEqual({ status: 'draft' });
+    expect(result).toEqual({ status: 'draft', action_tasks_done: 1 });
+    expect(db.writes).toContainEqual({
+      table: 'action_events',
+      op: 'insert',
+      value: {
+        action_id: 'act-1',
+        event: 'task_status',
+        data: { taskId: 't-optimize', to: 'completed', draftId: 'd1' },
+        actor_id: 'user-1',
+      },
+    });
     expect(db.rpcCalls).toContainEqual([
       'content_draft_snapshot',
       { p_draft_id: 'd1', p_origin: 'ready' },
@@ -276,7 +289,10 @@ describe('setContentDraftReadyFor', () => {
 
     db.writes = [];
     db.rows.content_drafts = draftRow({ status: 'published' });
-    await expect(setContentDraftReadyFor(auth, 'd1')).resolves.toEqual({ status: 'published' });
+    await expect(setContentDraftReadyFor(auth, 'd1')).resolves.toEqual({
+      status: 'published',
+      action_tasks_done: 0,
+    });
     expect(db.writes).toEqual([]);
   });
 

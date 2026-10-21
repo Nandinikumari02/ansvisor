@@ -8,6 +8,7 @@ import {
   type DroppedReason,
 } from '@/lib/content/agent-suggestions';
 import { classifyDomain, extractHostname, normalizeDomain } from '@/lib/citations/classify';
+import { completeDraftTasks } from '@/lib/content/action-drafts';
 import { CITED_DAYS, passageKey, quotedPassages } from '@/lib/content/cited-passages';
 import { contentEditorPath, isPageType, type PageType } from '@/lib/content/drafts';
 import { IMPACT_PERIODS } from '@/lib/content/impact';
@@ -442,18 +443,20 @@ export async function suggestContentChangesFor(
 
 /**
  * Ready (spec §6): a draft is ready to publish, and History keeps it as a
- * version. An agent's draft in review waits for a person to mark it ready in
- * the editor ('in_review'): the key that wrote it can't approve it. A draft
- * already ready or published keeps its status. Null outside the organization.
+ * version; a draft linked to an action completes its task there, as Mark
+ * ready does (CE-022). An agent's draft in review waits for a person to mark
+ * it ready in the editor ('in_review'): the key that wrote it can't approve
+ * it. A draft already ready or published keeps its status. Null outside the
+ * organization.
  */
 export async function setContentDraftReadyFor(
   auth: McpAuthContext,
   draftId: string,
-): Promise<{ status: string } | 'in_review' | null> {
+): Promise<{ status: string; action_tasks_done: number } | 'in_review' | null> {
   const draft = await draftFor(auth, draftId);
   if (!draft) return null;
   if (draft.status === 'in_review') return 'in_review';
-  if (draft.status !== 'draft') return { status: draft.status };
+  if (draft.status !== 'draft') return { status: draft.status, action_tasks_done: 0 };
   const { data, error } = await supabaseAdmin
     .from('content_drafts')
     .update({ status: 'ready' })
@@ -469,5 +472,24 @@ export async function setContentDraftReadyFor(
     });
     if (versionError) console.error('Failed to keep the ready version:', versionError.message);
   }
-  return { status: data?.status ?? draft.status };
+  let done = 0;
+  if (data && draft.action_id) {
+    // The draft is ready either way; a task left open can be ticked in the drawer.
+    try {
+      done = await completeDraftTasks(
+        supabaseAdmin,
+        {
+          id: draft.id,
+          brandId: draft.brand_id,
+          actionId: draft.action_id,
+          method: draft.method === 'create' ? 'create' : 'optimize',
+        },
+        // The API key's user, as update_task_status records it.
+        auth.userId,
+      );
+    } catch (err) {
+      console.error("Failed to complete the action's task:", err);
+    }
+  }
+  return { status: data?.status ?? draft.status, action_tasks_done: done };
 }

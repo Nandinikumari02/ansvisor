@@ -1516,7 +1516,7 @@ export function createMcpServer(auth: McpAuthContext): McpServer {
     'set_content_draft_ready',
     {
       description:
-        "Mark a draft ready to publish, as the editor's Mark ready does: from draft only — an agent's draft in review waits for a person to mark it ready in the editor. History keeps the page as a version. Ansvisor never publishes — a person does. Only on explicit user intent.",
+        "Mark a draft ready to publish, as the editor's Mark ready does: from draft only — an agent's draft in review waits for a person to mark it ready in the editor. History keeps the page as a version, and a draft linked to an Action Center action completes the action's writing task (action_tasks_done). Ansvisor never publishes — a person does. Only on explicit user intent.",
       inputSchema: {
         draft_id: relaxedUuid.describe('Draft UUID.'),
       },
