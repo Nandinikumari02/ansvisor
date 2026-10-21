@@ -3105,9 +3105,31 @@
         "protect": { "title": "Protect", "hint": "Top pages · edit with care" },
         "overlaps": { "title": "Overlaps", "hint": "Pages competing for the same prompts" }
       },
+      "results": {
+        "label": "From AI visits · {days} full days to yesterday (UTC):",
+        "visits": "{count, plural, one {{value} visit} other {{value} visits}}",
+        "keyEvents": "{count, plural, one {{value} key event} other {{value} key events}}",
+        "orders": "{count, plural, one {{value} order} other {{value} orders}}",
+        "revenue": "{value} revenue",
+        "needsAnalytics": "<link>Connect Google Analytics</link> to see what they did next."
+      },
+      "mix": {
+        "title": "What AI cites in your topics",
+        "aiShare": "Share of AI citations",
+        "yourShare": "Your pages' mix",
+        "shares": "{ai}% · {yours}%",
+        "pages": "{count, plural, =0 {No page} one {# page} other {# pages}}",
+        "gap": "{count, plural, =0 {Gap · no page} one {Gap · # page} other {Gap · # pages}}",
+        "empty": "No cited pages with a known type in this period yet.",
+        "covered": "The shares cover {pct}% of the period's AI citations: the most cited addresses whose type shows. Forums, encyclopedias, news and the long tail of less cited pages aren't in them."
+      },
       "listTitle": "Priority list",
+      "earlier": {
+        "none": "No page reads as losing ground yet: tracking began {since}, so the {days} days before aren't tracked to compare with.",
+        "partial": "The {days} days before are tracked only since {since}: pages are compared per tracked answer."
+      },
       "ranked": "Ranked by impact · overlaps checked",
-      "filtered": "Filtered · click the card again to clear",
+      "filtered": "Filtered · click it again to clear",
       "columns": {
         "page": "Page",
         "action": "Action",

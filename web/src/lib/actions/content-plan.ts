@@ -2,7 +2,9 @@
 
 import { z } from 'zod';
 import { createClient } from '@/lib/supabase/server';
+import { getSuggestionSourceStates } from '@/lib/actions/integrations';
 import type { DraftMethod } from '@/lib/content/drafts';
+import type { CitedAddress, PlanResults } from '@/lib/content/plan-mix';
 import {
   PLAN_PERIODS,
   type PlanAnswers,
@@ -10,7 +12,9 @@ import {
   type PlanOpportunity,
   type PlanPage,
   type PlanPeriod,
+  type PlanTracking,
 } from '@/lib/content/plan';
+import { googleSourceStatus } from '@/lib/traffic-sources';
 
 /**
  * What the Content plan (CE-014) is built from, read through the signed-in
@@ -26,7 +30,11 @@ const DRAFT_LIMIT = 500;
 
 const planInput = z.object({
   brandId: z.guid(),
-  days: z.union(PLAN_PERIODS.map((d) => z.literal(d)) as [z.ZodLiteral<7>, z.ZodLiteral<30>]),
+  days: z.union([
+    z.literal(PLAN_PERIODS[0]),
+    z.literal(PLAN_PERIODS[1]),
+    z.literal(PLAN_PERIODS[2]),
+  ]),
 });
 
 const text = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
@@ -37,6 +45,7 @@ export async function getContentPlan(
 ): Promise<{
   pages: PlanPage[];
   answers: PlanAnswers;
+  tracking: PlanTracking;
   opportunities: PlanOpportunity[];
   drafts: PlanDraft[];
 } | null> {
@@ -68,10 +77,19 @@ export async function getContentPlan(
   if (!pagesRes.data) return null;
   const me = userRes.data.user?.id ?? null;
 
-  const read = pagesRes.data as unknown as { pages?: PlanPage[]; answers?: Partial<PlanAnswers> };
+  const read = pagesRes.data as unknown as {
+    pages?: PlanPage[];
+    answers?: Partial<PlanAnswers>;
+    prevFrom?: string;
+    trackedSince?: string | null;
+  };
   const answers = {
     cur: Number(read.answers?.cur ?? 0),
     prev: Number(read.answers?.prev ?? 0),
+  };
+  const tracking = {
+    prevFrom: read.prevFrom ?? null,
+    trackedSince: read.trackedSince ?? null,
   };
   const pages = (read.pages ?? []).map((p) => ({
     page: p.page,
@@ -115,5 +133,53 @@ export async function getContentPlan(
     }),
   );
 
-  return { pages, answers, opportunities, drafts };
+  return { pages, answers, tracking, opportunities, drafts };
+}
+
+/**
+ * What AI cites in the brand's tracked answers, and what AI visits brought
+ * in, for the Plan's page-type mix and results strip (content_plan_insights,
+ * 00221). Analytics counts as connected as AI Traffic says it is: the
+ * property set, the connection live and data synced (googleSourceStatus).
+ * Null outside the member's organization.
+ */
+export async function getContentPlanInsights(
+  brandId: string,
+  days: PlanPeriod,
+): Promise<{ citations: CitedAddress[]; totalCitations: number; results: PlanResults } | null> {
+  if (!planInput.safeParse({ brandId, days }).success) throw new Error('invalid');
+  const supabase = await createClient();
+  const [{ data, error }, gaConnected] = await Promise.all([
+    supabase.rpc('content_plan_insights', { p_brand_id: brandId, p_days: days }),
+    getSuggestionSourceStates(brandId).then(
+      (states) => googleSourceStatus(states.ga) === 'connected',
+      // The property alone decides then, as before.
+      () => null,
+    ),
+  ]);
+  if (error) throw new Error(error.message);
+  if (!data) return null;
+  const read = data as unknown as {
+    totalCitations?: number;
+    citations?: CitedAddress[];
+    results?: Partial<PlanResults>;
+  };
+  const r = read.results ?? {};
+  return {
+    totalCitations: Number(read.totalCitations ?? 0),
+    citations: (read.citations ?? []).map((c) => ({
+      url: c.url,
+      title: c.title ?? null,
+      own: Boolean(c.own),
+      citations: Number(c.citations ?? 0),
+    })),
+    results: {
+      visits: Number(r.visits ?? 0),
+      keyEvents: Number(r.keyEvents ?? 0),
+      transactions: Number(r.transactions ?? 0),
+      revenue: Number(r.revenue ?? 0),
+      analytics: Boolean(r.analytics) && gaConnected !== false,
+      purchases: Boolean(r.purchases),
+    },
+  };
 }

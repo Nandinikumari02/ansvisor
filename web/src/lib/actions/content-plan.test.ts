@@ -33,13 +33,18 @@ vi.mock('@/lib/supabase/server', () => ({
   })),
 }));
 
-const { getContentPlan } = await import('./content-plan');
+const getSuggestionSourceStates = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/actions/integrations', () => ({ getSuggestionSourceStates }));
+const GA_CONNECTED = { configured: true, connected: true, mapped: true, lastDataAt: '2026-10-20' };
+
+const { getContentPlan, getContentPlanInsights } = await import('./content-plan');
 
 beforeEach(() => {
   reads = {};
   rpcResult = { days: 30, pages: [] };
   rpcCalls = [];
   filters = [];
+  getSuggestionSourceStates.mockReset().mockResolvedValue({ ga: GA_CONNECTED });
 });
 
 describe('getContentPlan', () => {
@@ -47,6 +52,8 @@ describe('getContentPlan', () => {
     rpcResult = {
       days: 7,
       answers: { cur: 120, prev: 140 },
+      prevFrom: '2026-10-07',
+      trackedSince: '2026-09-09',
       pages: [
         {
           page: 'https://acme.example/guides/espresso',
@@ -99,6 +106,7 @@ describe('getContentPlan', () => {
         },
       ],
       answers: { cur: 120, prev: 140 },
+      tracking: { prevFrom: '2026-10-07', trackedSince: '2026-09-09' },
       opportunities: [
         {
           id: 'o1',
@@ -143,7 +151,50 @@ describe('getContentPlan', () => {
   it('reads nothing of another organization’s brand, and refuses another period', async () => {
     rpcResult = null;
     await expect(getContentPlan(BRAND, 30)).resolves.toBeNull();
-    await expect(getContentPlan(BRAND, 90 as 30)).rejects.toThrow('invalid');
+    await expect(getContentPlan(BRAND, 14 as 30)).rejects.toThrow('invalid');
     await expect(getContentPlan('nope', 30)).rejects.toThrow('invalid');
+  });
+});
+
+describe('getContentPlanInsights', () => {
+  it('reads what AI cites and what AI visits brought in', async () => {
+    rpcResult = {
+      days: 30,
+      totalCitations: 120,
+      citations: [
+        { url: 'https://acme.example/vs/hubspot', title: null, own: true, citations: '7' },
+      ],
+      results: { visits: 40, keyEvents: 5, analytics: true, purchases: false },
+    };
+    await expect(getContentPlanInsights(BRAND, 30)).resolves.toEqual({
+      totalCitations: 120,
+      citations: [{ url: 'https://acme.example/vs/hubspot', title: null, own: true, citations: 7 }],
+      results: {
+        visits: 40,
+        keyEvents: 5,
+        transactions: 0,
+        revenue: 0,
+        analytics: true,
+        purchases: false,
+      },
+    });
+    expect(rpcCalls).toEqual([['content_plan_insights', { p_brand_id: BRAND, p_days: 30 }]]);
+  });
+
+  it('counts Analytics as connected only as AI Traffic does: connected and synced', async () => {
+    rpcResult = { totalCitations: 0, citations: [], results: { analytics: true } };
+    getSuggestionSourceStates.mockResolvedValue({ ga: { ...GA_CONNECTED, lastDataAt: null } });
+    expect((await getContentPlanInsights(BRAND, 30))!.results.analytics).toBe(false);
+    getSuggestionSourceStates.mockResolvedValue({ ga: { ...GA_CONNECTED, connected: false } });
+    expect((await getContentPlanInsights(BRAND, 30))!.results.analytics).toBe(false);
+    // The connection can't be read: the property set says it.
+    getSuggestionSourceStates.mockRejectedValue(new Error('down'));
+    expect((await getContentPlanInsights(BRAND, 30))!.results.analytics).toBe(true);
+  });
+
+  it('reads nothing of another organization’s brand', async () => {
+    rpcResult = null;
+    await expect(getContentPlanInsights(BRAND, 7)).resolves.toBeNull();
+    await expect(getContentPlanInsights(BRAND, 14 as 7)).rejects.toThrow('invalid');
   });
 });
