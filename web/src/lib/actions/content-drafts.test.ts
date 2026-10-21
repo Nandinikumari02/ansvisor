@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  */
 
 const DRAFT = '2f1d1c52-0f7a-4c1e-9b8a-5d6e7f8a9b0c';
+const VERSION = '3a2e2d63-1f8b-4d2f-8c9b-6e7f8a9b0c1d';
 
 interface Call {
   op: string;
@@ -148,6 +149,18 @@ describe('saveContentDraft', () => {
     expect(result).toMatchObject({ ok: true, updatedAt: '2026-10-20T15:01:00Z' });
     expect(calls.map((c) => c.op)).toEqual(['update', 'select', 'update']);
     expect(calls[2].filters).toContainEqual(['eq', 'updated_at', '2026-10-20T14:30:00Z']);
+  });
+
+  it('takes the page of its own save whose answer was lost as its own', async () => {
+    // The lost save wrote "<h1>Mine</h1>"; the editor still holds the loaded base.
+    updates = [null, { updated_at: '2026-10-20T15:01:00Z' }];
+    row = { updated_at: '2026-10-20T14:30:00Z', body_html: '<h1>Mine</h1>' };
+    const result = await saveContentDraft(DRAFT, {
+      title: 'Mine',
+      bodyHtml: '<h1>Mine</h1><p>More</p>',
+      base: { ...(await base()), unconfirmedHash: await bodyHash('<h1>Mine</h1>') },
+    });
+    expect(result).toMatchObject({ ok: true, updatedAt: '2026-10-20T15:01:00Z' });
   });
 
   it('doesn’t overwrite a page someone else changed', async () => {
@@ -406,16 +419,41 @@ describe('History', () => {
       data: { title: 'Old', bodyHtml: '<h1>Old</h1>', updatedAt: '2026-10-21T10:00:00Z' },
       error: null,
     };
-    await expect(restoreDraftVersion(DRAFT)).resolves.toEqual({
+    await expect(restoreDraftVersion(DRAFT, VERSION)).resolves.toEqual({
       title: 'Old',
       bodyHtml: '<h1>Old</h1>',
       updatedAt: '2026-10-21T10:00:00Z',
     });
-    expect(rpcCalls).toEqual([['content_draft_restore', { p_version_id: DRAFT }]]);
+    expect(rpcCalls).toEqual([['content_draft_restore', { p_version_id: VERSION }]]);
 
     rpcResult = { data: null, error: null };
-    await expect(restoreDraftVersion(DRAFT)).rejects.toThrow('not_found');
-    await expect(restoreDraftVersion('../etc')).rejects.toThrow('invalid');
+    await expect(restoreDraftVersion(DRAFT, VERSION)).rejects.toThrow('not_found');
+    await expect(restoreDraftVersion(DRAFT, '../etc')).rejects.toThrow('invalid');
+  });
+
+  it('gives a draft whose type follows its page the restored page’s type', async () => {
+    rpcResult = {
+      data: { title: 'Acme vs HubSpot', bodyHtml: '<h1>Acme vs HubSpot</h1>', updatedAt: 't1' },
+      error: null,
+    };
+    row = {
+      page_type: 'blog_post',
+      page_type_source: 'detected',
+      body_html: '<h1>Acme vs HubSpot</h1>',
+      brands: { site_type: 'b2b', industry: 'Software', shopping_mode_enabled: false },
+    };
+    updates = [{ updated_at: 't2' }];
+    // The saves go on from the type write.
+    await expect(restoreDraftVersion(DRAFT, VERSION)).resolves.toMatchObject({ updatedAt: 't2' });
+    const typed = calls.find((call) => call.op === 'update')!;
+    expect(typed.value).toEqual({ page_type: 'comparison' });
+    expect(typed.filters).toContainEqual(['eq', 'page_type_source', 'detected']);
+
+    // A type the person picked stays.
+    calls = [];
+    row = { ...row, page_type_source: 'user' };
+    await expect(restoreDraftVersion(DRAFT, VERSION)).resolves.toMatchObject({ updatedAt: 't1' });
+    expect(calls.some((call) => call.op === 'update')).toBe(false);
   });
 });
 

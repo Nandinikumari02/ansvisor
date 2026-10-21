@@ -35,7 +35,12 @@ import {
   startAgentWriting,
 } from '@/lib/actions/content-drafts';
 import { agentWriteRequest, useRuleDescriber } from '@/lib/content/agent-write';
-import { CONTENT_LIBRARY_PATH, type ContentDraft, type PageType } from '@/lib/content/drafts';
+import {
+  CONTENT_LIBRARY_PATH,
+  isPageType,
+  type ContentDraft,
+  type PageType,
+} from '@/lib/content/drafts';
 import { CITED_DAYS, MAX_PASSAGES, type CitedPassage } from '@/lib/content/cited-passages';
 import type { DraftVersion } from '@/lib/content/history';
 import type { DraftSuggestion, SuggestionStatus } from '@/lib/content/suggestions';
@@ -62,6 +67,7 @@ import {
 } from './_cited-passages';
 import { HistoryMenu } from './_history-menu';
 import { HtmlBlock, copyToClipboard } from './_html-block';
+import { OwnCopies, ownCopyHtml } from './_own-copies';
 import { PageTypeMenu } from './_page-type-menu';
 import { ruleStatusText, type AgentFix } from './_rules-tab';
 import { EditorSidePanel, useSidePanelOpen } from './_side-panel';
@@ -69,6 +75,7 @@ import {
   AgentSuggestions,
   acceptInto,
   suggestionsKey,
+  redoDecision,
   undoInto,
   type SuggestionDecision,
   type SuggestionLabels,
@@ -165,11 +172,17 @@ export function DraftEditor({
   // History keeps the page before the first suggestion accepted here.
   const agentBeforeKept = useRef(false);
   const onDecide = useRef<(id: string, decision: SuggestionDecision) => void>(() => {});
-  // A picked page type, or the one the page shows as it is written.
+  // A picked page type, or the one the page shows as it is written. As on
+  // a save, a page that shows no type keeps the one it had (the stored one
+  // to start with), so the header and the Library agree.
   const [picked, setPicked] = useState(draft.pageTypeSource === 'user' ? draft.pageType : null);
-  const [detectedType, setDetectedType] = useState(() =>
-    detectPageType({ title: draft.title, html: draft.bodyHtml }, draft.siteType),
+  const [detectedType, setDetectedType] = useState(
+    () =>
+      detectPageType({ title: draft.title, html: draft.bodyHtml }, draft.siteType) ??
+      (isPageType(draft.pageType) ? draft.pageType : null),
   );
+  const detectType = (title: string, html: string) =>
+    setDetectedType((had) => detectPageType({ title, html }, draft.siteType) ?? had);
   const pageType = picked ?? detectedType;
   // The HTML view's text while it is open; null in the visual editor.
   const [htmlSource, setHtmlSource] = useState<string | null>(null);
@@ -204,6 +217,7 @@ export function DraftEditor({
         label: (type) => (type ? t('jsonLd', { type }) : t('jsonLdUntyped')),
       }),
       HtmlBlock,
+      OwnCopies,
       CitedPassages.configure({
         // The first change held is the one asked about: some keyboards
         // still send the text of a key whose keydown was held, and the
@@ -218,9 +232,11 @@ export function DraftEditor({
     editorProps: {
       attributes: { class: DOCUMENT_CLASS, 'aria-label': t('documentLabel') },
       transformPastedHTML: (html) => {
-        // A copy from this editor keeps its images, and needs no word about it.
-        if (html.includes('data-pm-slice')) {
-          return cleanHtml(html, { keepImages: true, keepHtmlBlocks: true }).html;
+        // A copy from this editor keeps its images and HTML blocks, and needs
+        // no word about it. Only this tab's copies carry its mark.
+        const own = ownCopyHtml(html);
+        if (own !== null) {
+          return cleanHtml(own, { keepImages: true, keepHtmlBlocks: true }).html;
         }
         // Images from elsewhere wait for attachments (CE-006): Docs' and
         // Word's are temporary addresses or embedded data.
@@ -265,7 +281,7 @@ export function DraftEditor({
       clearTimeout(pageReadTimer.current);
       pageReadTimer.current = setTimeout(() => {
         setPageHtml(bodyHtml);
-        setDetectedType(detectPageType({ title: next, html: bodyHtml }, draft.siteType));
+        detectType(next, bodyHtml);
       }, PAGE_READ_DELAY_MS);
     },
   });
@@ -362,7 +378,7 @@ export function DraftEditor({
         unlocked: new Set(locks.unlocked).add(held.key),
       }),
     );
-    // A held paste, cut or join goes through; typed text is typed again.
+    // The held change goes through: a paste, a cut, or the key pressed.
     if (held.tr && held.tr.before.eq(editor.state.doc)) {
       editor.view.dispatch(held.tr.setMeta(CITED_EDIT_ALLOWED, true));
     }
@@ -465,7 +481,28 @@ export function DraftEditor({
       } finally {
         if (editable) editor.setEditable(true, false);
       }
-      if (tr?.docChanged && tr.before.eq(editor.state.doc)) editor.view.dispatch(tr);
+      if (tr?.docChanged) {
+        let change = tr;
+        if (!tr.before.eq(editor.state.doc)) {
+          // The page changed while the decision was saved: the change is made
+          // again on the page as it is now. What it no longer fits goes back
+          // to how it was, saved as well, so the cards and the page agree.
+          const redo = redoDecision(
+            editor.state,
+            all,
+            changed,
+            decision === 'accept' ? 'accept' : 'undo',
+          );
+          change = redo.tr;
+          if (redo.failed.length > 0) {
+            const back: SuggestionStatus = decision === 'accept' ? 'open' : 'accepted';
+            await decideDraftSuggestions(redo.failed, back);
+            for (const s of next) if (redo.failed.includes(s.id)) s.status = back;
+            toast(t('suggestions.notApplied', { count: redo.failed.length }));
+          }
+        }
+        if (change.docChanged) editor.view.dispatch(change);
+      }
       setSuggestions(next);
       if (decision === 'accept')
         toast.success(t('suggestions.acceptedToast', { count: changed.length }));
@@ -716,7 +753,7 @@ export function DraftEditor({
     editor.setEditable(false, false);
     try {
       await autosave.settle();
-      const restored = await restoreDraftVersion(version.id);
+      const restored = await restoreDraftVersion(draft.id, version.id);
       editor
         .chain()
         .setMeta(CITED_EDIT_ALLOWED, true)
@@ -728,7 +765,7 @@ export function DraftEditor({
       const html = editor.getHTML();
       setTitle(restored.title);
       setPageHtml(html);
-      setDetectedType(detectPageType({ title: restored.title, html }, draft.siteType));
+      detectType(restored.title, html);
       toast.success(t('history.restored', { version: label }));
       void loadCited();
     } catch (err) {
