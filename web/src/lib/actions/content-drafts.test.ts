@@ -46,13 +46,8 @@ vi.mock('@/lib/supabase/server', () => ({
   })),
 }));
 
-const {
-  createContentDraft,
-  getContentDraft,
-  markContentDraftReady,
-  saveContentDraft,
-  setContentDraftPageType,
-} = await import('./content-drafts');
+const { getContentDraft, markContentDraftReady, saveContentDraft, setContentDraftPageType } =
+  await import('./content-drafts');
 const { bodyHash } = await import('@/lib/content/editor');
 
 beforeEach(() => {
@@ -177,6 +172,21 @@ describe('the page type on save (CE-023)', () => {
     });
   });
 
+  it('keeps the type it had when the page shows none, as Start’s guess', async () => {
+    updated = {
+      updated_at: '2026-10-20T15:00:00Z',
+      page_type: 'blog_post',
+      page_type_source: 'detected',
+      brands: shop,
+    };
+    await saveContentDraft(DRAFT, {
+      title: 'Our spring update',
+      bodyHtml: '<h1>Our spring update</h1>',
+      base,
+    });
+    expect(calls.map((call) => call.op)).toEqual(['update']);
+  });
+
   it('writes nothing more when the type is unchanged, or the person picked it', async () => {
     updated = {
       updated_at: '2026-10-20T15:00:00Z',
@@ -256,7 +266,7 @@ describe('markContentDraftReady', () => {
   });
 });
 
-describe('getContentDraft and createContentDraft', () => {
+describe('getContentDraft', () => {
   it('opens a draft with its brand’s site type, chosen or guessed', async () => {
     const base = {
       id: DRAFT,
@@ -289,10 +299,5 @@ describe('getContentDraft and createContentDraft', () => {
   it('reads nothing for a malformed id', async () => {
     await expect(getContentDraft('../etc')).resolves.toBeNull();
     expect(calls).toEqual([]);
-  });
-
-  it('starts a blank draft as the signed-in member', async () => {
-    await expect(createContentDraft('b1')).resolves.toBe('new-draft');
-    expect(calls[0]).toMatchObject({ op: 'insert', value: { brand_id: 'b1', created_by: 'u1' } });
   });
 });
