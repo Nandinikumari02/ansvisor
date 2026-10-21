@@ -7,27 +7,33 @@ import { addDraftPrompts, getDraftSources, rebuildDraftBrief } from '@/lib/actio
 import { builtFromCount, rebuildSources, type DraftBrief } from '@/lib/content/brief';
 import type { ContentDraft } from '@/lib/content/drafts';
 import type { DraftSourceChoice, DraftSourcesData } from '@/lib/content/sources';
+import type { SourcesRead } from './_use-draft-reads';
 
 /** The page as written now: a rebuild reads its headings and length. */
 export interface PageNow {
   title: string;
   html: string;
-  pageType: string | null;
+  /** The length the rules ask for. */
+  length: number;
 }
 
 /**
  * Rebuild outline (CE-007), from the Brief tab, Sources' "Rebuild with
  * selection" or Impact's "Use lost prompts": the sources kept (as the
- * Sources tab has them, or read afresh), the page as written now, and the
- * brief the server writes from them, metered from the AI usage budget.
+ * editor has them, or read afresh once prompts were added), the page as
+ * written now, and the brief the server writes from them, metered from the
+ * AI usage budget.
  */
 export function useBriefRebuild({
   draft,
   pageNow,
+  sourcesNow,
   onRebuilt,
 }: {
   draft: ContentDraft;
   pageNow: () => PageNow;
+  /** The sources as the editor has them; null until read. */
+  sourcesNow: () => SourcesRead | null;
   onRebuilt: (brief: DraftBrief) => void;
 }) {
   const t = useTranslations('contentEditor.editor.brief');
@@ -41,8 +47,12 @@ export function useBriefRebuild({
   ): Promise<boolean> => {
     setRebuilding(true);
     try {
-      if (options.addPrompts?.length) await addDraftPrompts(draft.id, options.addPrompts);
-      const read = options.sources ?? (await getDraftSources(draft.id));
+      const added = !!options.addPrompts?.length;
+      if (added) await addDraftPrompts(draft.id, options.addPrompts!);
+      // Prompts just added aren't in the sources in hand: those are read afresh.
+      const inHand = added ? null : sourcesNow();
+      const read =
+        options.sources ?? (inHand && !inHand.failed ? inHand : await getDraftSources(draft.id));
       if (!read) throw new Error('not_found');
       const page = pageNow();
       const result = await rebuildDraftBrief(
@@ -52,7 +62,7 @@ export function useBriefRebuild({
           title: page.title,
           sourceUrl: draft.sourceUrl,
           html: page.html,
-          pageType: page.pageType,
+          length: page.length,
         }),
       );
       if ('error' in result) {
