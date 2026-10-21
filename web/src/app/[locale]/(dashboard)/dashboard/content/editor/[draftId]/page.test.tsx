@@ -295,18 +295,21 @@ describe('the content editor', () => {
       await rewrite('<h1>How to clean CRM data</h1>');
       // It reads the page once typing pauses.
       await act(() => new Promise((resolve) => setTimeout(resolve, 450)));
-      expect(typeMenu().textContent).toBe('Guide');
+      expect(typeMenu().textContent).toBe('How-to guide');
 
       const types = await openTypes();
       expect(types.map((item) => item.textContent)).toEqual([
         'Feature page',
-        'Solution page',
+        'Use case page',
         'Comparison',
+        'Alternatives page',
+        'Best-of list',
+        'How-to guide',
+        'Definition page',
         'Integration',
         'Pricing',
-        'Guide',
-        'Blog post',
         'Docs / FAQ',
+        'Blog post',
       ]);
       expect(document.body.textContent).toContain('B2B SaaS page types');
       await act(async () => types.find((item) => item.textContent === 'Pricing')!.click());
@@ -330,8 +333,15 @@ describe('the content editor', () => {
       expect(types.map((item) => item.textContent)).toEqual([
         'Product page',
         'Category page',
+        'Collection page',
         'Buying guide',
         'Best-of list',
+        'Comparison',
+        'Alternatives page',
+        'How-to guide',
+        'Definition page',
+        'Sizing guide',
+        'Help & FAQ',
         'Policy',
         'Blog post',
         'Feature page',

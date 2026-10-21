@@ -160,12 +160,12 @@ describe('the Content plan', () => {
         'Daily Grind Co. and Origin Box cited · you 6%Opportunity',
       ],
       [
-        'Coffee subscriptionsGuide/guides/coffee-subscriptions',
+        'Coffee subscriptionsHow-to guide/guides/coffee-subscriptions',
         'Optimize',
         'Citations −70% on ChatGPT and PerplexityCitations',
       ],
       [
-        'Espresso guideGuide/guides/espresso⚠ Overlap',
+        'Espresso guideHow-to guide/guides/espresso⚠ Overlap',
         'Protect',
         'Top page · 12 citations · 42 AI visitsProtect',
       ],
@@ -270,7 +270,7 @@ describe('the Content plan', () => {
     // AI's mix (guides 40 of 60 typed) against the brand's own pages' (guides 10 of 30).
     // The gap shows twice: under the shares on a phone, in its column on wider screens.
     expect([...mix.querySelectorAll('li')].map((li) => li.textContent)).toEqual([
-      'Guide67% · 33%Gap · 1 pageGap · 1 page',
+      'How-to guide67% · 33%Gap · 1 pageGap · 1 page',
       'Blog post33% · 67%1 page',
     ]);
     expect(mix.querySelector('p')!.textContent).toBe(
@@ -287,8 +287,8 @@ describe('the Content plan', () => {
     await act(async () => guide().click());
     expect(guide().getAttribute('aria-pressed')).toBe('true');
     expect(rowTexts().map((r) => r[0])).toEqual([
-      'Coffee subscriptionsGuide/guides/coffee-subscriptions',
-      'Espresso guideGuide/guides/espresso⚠ Overlap',
+      'Coffee subscriptionsHow-to guide/guides/coffee-subscriptions',
+      'Espresso guideHow-to guide/guides/espresso⚠ Overlap',
     ]);
     await act(async () => guide().click());
     expect(rowTexts()).toHaveLength(3);
