@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { Check, ExternalLink, Loader2 } from 'lucide-react';
 import { Link } from '@/i18n/navigation';
+import { Button } from '@/components/ui/button';
 import { getContentImpact, getContentResults } from '@/lib/actions/content-drafts';
 import {
   DEFAULT_IMPACT_PERIOD,
@@ -40,7 +41,18 @@ interface ImpactRead {
  * from AI visits, per AI source; the brand's other pages cited for the same
  * prompts; and where the numbers come from.
  */
-export function ImpactTab({ brandId, pageUrl }: { brandId: string; pageUrl: string | null }) {
+export function ImpactTab({
+  brandId,
+  pageUrl,
+  rebuilding = false,
+  onUseLostPrompts,
+}: {
+  brandId: string;
+  pageUrl: string | null;
+  /** Use lost prompts in this draft: they join its sources and the brief is rebuilt. */
+  rebuilding?: boolean;
+  onUseLostPrompts?: (promptIds: string[]) => void;
+}) {
   const t = useTranslations('contentEditor.editor.impact');
   const [period, setPeriod] = useState<ImpactPeriod>(DEFAULT_IMPACT_PERIOD);
   const [read, setRead] = useState<ImpactRead | null>(null);
@@ -118,7 +130,14 @@ export function ImpactTab({ brandId, pageUrl }: { brandId: string; pageUrl: stri
           </button>
         </p>
       ) : (
-        <ImpactBody impact={impact} results={current.results} period={period} pageUrl={pageUrl} />
+        <ImpactBody
+          impact={impact}
+          results={current.results}
+          period={period}
+          pageUrl={pageUrl}
+          rebuilding={rebuilding}
+          onUseLostPrompts={onUseLostPrompts}
+        />
       )}
     </div>
   );
@@ -129,16 +148,22 @@ function ImpactBody({
   results,
   period,
   pageUrl,
+  rebuilding,
+  onUseLostPrompts,
 }: {
   impact: ContentImpact;
   results: ContentResults | null;
   period: ImpactPeriod;
   pageUrl: string;
+  rebuilding: boolean;
+  onUseLostPrompts?: (promptIds: string[]) => void;
 }) {
   const t = useTranslations('contentEditor.editor.impact');
   const coverage = gscCoverage(impact.gscSince, period);
   const cited = impact.promptCounts;
   const lost = impact.promptCounts.lost;
+  // The lost prompts listed, to use in the draft (the list is capped at 100).
+  const lostPrompts = impact.prompts.filter(isLost);
   const promptDelta = cited.cur - cited.prev;
 
   return (
@@ -239,13 +264,26 @@ function ImpactBody({
             })}
           </ul>
         )}
-        <Link
-          href={`/dashboard/citations/url?u=${encodeURIComponent(pageUrl)}`}
-          className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-        >
-          {t('prompts.seeInCitations')}
-          <ExternalLink className="h-3 w-3" />
-        </Link>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <Link
+            href={`/dashboard/citations/url?u=${encodeURIComponent(pageUrl)}`}
+            className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+          >
+            {t('prompts.seeInCitations')}
+            <ExternalLink className="h-3 w-3" />
+          </Link>
+          {lostPrompts.length > 0 && onUseLostPrompts && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={rebuilding}
+              onClick={() => onUseLostPrompts(lostPrompts.map((p) => p.id))}
+            >
+              {rebuilding && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              {t('prompts.useLost', { count: lostPrompts.length })}
+            </Button>
+          )}
+        </div>
       </section>
 
       {results && <ImpactResults results={results} />}
