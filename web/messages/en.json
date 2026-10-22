@@ -5575,6 +5575,7 @@
     "kpiTopMerchantSub": "Most frequent merchant domain",
     "platformBreakdownTitle": "Card rate by platform",
     "trendTitle": "Your shopping presence — last 30 days",
+    "amazonShareDropAlert": "Amazon's share fell from {from}% to {to}% over the last seven days. AI may be leaving Amazon out; your own store link matters more.",
     "filterRegion": "Region",
     "filterPlatform": "Platform",
     "filterDateRange": "Date range",
