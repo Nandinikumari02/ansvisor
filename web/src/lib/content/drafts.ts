@@ -79,8 +79,11 @@ export function contentEditorPath(draftId: string) {
   return `/dashboard/content/editor/${draftId}`;
 }
 
-/** The Library's tabs: everything, then one per status. */
-export const LIBRARY_TABS = ['all', ...DRAFT_STATUSES] as const;
+/**
+ * The Library's tabs: everything, one per status, then the archived drafts
+ * (00233), which leave every other tab and keep their status for Restore.
+ */
+export const LIBRARY_TABS = ['all', ...DRAFT_STATUSES, 'archived'] as const;
 export type LibraryTab = (typeof LIBRARY_TABS)[number];
 
 export interface DraftAuthor {
@@ -102,11 +105,12 @@ export interface ContentDraftListItem {
   createdBy: DraftAuthor | null;
   /** Whether the signed-in member started it ("You"). */
   isMine: boolean;
-  scoreBefore: number | null;
-  scoreAfter: number | null;
   /** Where the Content Agent is on it (CE-015). */
   agentState: AgentState;
+  createdAt: string;
   updatedAt: string;
+  /** When an admin or manager archived it (00233); null when it isn't archived. */
+  archivedAt: string | null;
 }
 
 /**
@@ -227,7 +231,9 @@ export interface DraftStartOptions {
 }
 
 export function draftsInTab(drafts: ContentDraftListItem[], tab: LibraryTab) {
-  return tab === 'all' ? drafts : drafts.filter((d) => d.status === tab);
+  if (tab === 'archived') return drafts.filter((d) => d.archivedAt !== null);
+  const live = drafts.filter((d) => d.archivedAt === null);
+  return tab === 'all' ? live : live.filter((d) => d.status === tab);
 }
 
 export function libraryTabCounts(drafts: ContentDraftListItem[]): Record<LibraryTab, number> {
@@ -235,14 +241,13 @@ export function libraryTabCounts(drafts: ContentDraftListItem[]): Record<Library
     LibraryTab,
     number
   >;
-  counts.all = drafts.length;
-  for (const d of drafts) counts[d.status] += 1;
+  for (const d of drafts) {
+    if (d.archivedAt !== null) {
+      counts.archived += 1;
+    } else {
+      counts.all += 1;
+      counts[d.status] += 1;
+    }
+  }
   return counts;
-}
-
-/** "62 → 78" once the changes are scored, "54" before, null with no score yet. */
-export function aeoScoreText(before: number | null, after: number | null): string | null {
-  if (before !== null && after !== null && after !== before) return `${before} → ${after}`;
-  const score = after ?? before;
-  return score === null ? null : String(score);
 }
