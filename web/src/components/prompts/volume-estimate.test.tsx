@@ -1,0 +1,128 @@
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { NextIntlClientProvider } from 'next-intl';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import messages from '../../../messages/en.json';
+import { promptVolumeEstimate, sumEstimates, type VolumeEstimate } from '@/lib/volume-estimate';
+import {
+  EstimateBadge,
+  EstimateNoteTooltip,
+  EstimateRange,
+  createEstimateNoteHandle,
+} from './volume-estimate';
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
+
+const NOW = new Date('2026-10-22T12:00:00Z');
+const row = (googleVolumes: Record<string, number>, estAiVolume: number) => ({
+  estAiVolume,
+  googleVolumes,
+  aiVolumeMultiplier: 0.45,
+  keywords: [...Object.keys(googleVolumes), 'unmeasured'],
+  fetchedAt: '2026-10-10T19:28:41Z',
+});
+const medium = promptVolumeEstimate(row({ a: 400, b: 2000, c: 10_000 }, 900), NOW);
+const low = promptVolumeEstimate(row({ a: 2000 }, 900), NOW);
+
+let container: HTMLDivElement;
+let root: Root;
+
+beforeEach(() => {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+});
+
+function render(node: React.ReactNode) {
+  act(() =>
+    root.render(
+      <NextIntlClientProvider locale="en" messages={messages}>
+        {node}
+      </NextIntlClientProvider>,
+    ),
+  );
+}
+
+/** The method note a trigger opens on focus. */
+async function noteOf(trigger: HTMLElement) {
+  act(() => trigger.focus());
+  await act(() => new Promise((resolve) => setTimeout(resolve, 400)));
+  return document.querySelector('[data-slot="tooltip-content"]')?.textContent ?? '';
+}
+
+describe('EstimateRange', () => {
+  it('shows the range, not a bare number, and says how it was built on focus', async () => {
+    render(<EstimateRange estimate={medium} />);
+    const trigger = container.querySelector('button')!;
+    expect(trigger.textContent).toBe('540–1.8k');
+    expect(trigger.getAttribute('aria-label')).toBe(
+      '540–1.8k a month, estimated, Medium confidence',
+    );
+    expect(trigger.className).not.toContain('text-muted-foreground');
+
+    const note = await noteOf(trigger);
+    expect(note).toContain('How we estimate AI search volume');
+    expect(note).toContain('× the share of Google searches that now get an AI answer (45%)');
+    expect(note).toContain('3 of 4 related keywords have Google search data.');
+    expect(note).toContain('Sources: Google search volume from DataForSEO (Oct 2026)');
+    expect(note).toContain('Confidence: Medium · updated Oct 10, 2026');
+    expect(note).toContain('Measured numbers, such as your visibility');
+    expect(note).not.toContain('Low confidence');
+  });
+
+  it('greys a low-confidence estimate and says it is not ranked on its own', async () => {
+    render(<EstimateRange estimate={low} />);
+    const trigger = container.querySelector('button')!;
+    expect(trigger.textContent).toBe('450–1.8k');
+    expect(trigger.className).toContain('text-muted-foreground');
+    const note = await noteOf(trigger);
+    expect(note).toContain('With one to go by, the range is half to twice the estimate.');
+    expect(note).toContain('Low confidence: shown in grey, and not used to rank on its own.');
+  });
+
+  it('describes a total by its prompts and their confidence', async () => {
+    const total = sumEstimates([medium, low]);
+    render(<EstimateRange estimate={total} kind="total" />);
+    const note = await noteOf(container.querySelector('button')!);
+    expect(note).toContain("The sum of 2 prompts' estimates.");
+    expect(note).toContain('Confidence by prompt: 0 high, 1 medium, 1 low.');
+  });
+});
+
+describe('a shared note for a long table', () => {
+  it('mounts one note, telling the estimate whose range has focus', async () => {
+    const handle = createEstimateNoteHandle();
+    render(
+      <>
+        <EstimateRange estimate={medium} handle={handle} />
+        <EstimateRange estimate={low} handle={handle} />
+        <EstimateNoteTooltip handle={handle} />
+      </>,
+    );
+    const [first, second] = container.querySelectorAll('button');
+    expect(await noteOf(second as HTMLElement)).toContain('Confidence: Low');
+    expect(document.querySelectorAll('[data-slot="tooltip-content"]')).toHaveLength(1);
+    act(() => (second as HTMLElement).blur());
+    expect(await noteOf(first as HTMLElement)).toContain('Confidence: Medium');
+  });
+});
+
+describe('EstimateBadge', () => {
+  it('reads "Estimate", or "Estimate · low confidence"', () => {
+    const badge = (estimate: VolumeEstimate) => {
+      render(<EstimateBadge estimate={estimate} />);
+      return container.querySelector('button')!;
+    };
+    expect(badge(medium).textContent).toBe('Estimate');
+    expect(badge(medium).getAttribute('aria-label')).toBe(
+      "Estimate, Medium confidence: how it's built",
+    );
+    expect(badge(low).textContent).toBe('Estimate · low confidence');
+  });
+});
