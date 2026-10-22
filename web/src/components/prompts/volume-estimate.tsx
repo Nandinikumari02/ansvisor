@@ -39,7 +39,11 @@ function EstimateNote({ estimate, kind }: { estimate: Estimate; kind: EstimateKi
   return (
     <>
       <p className="font-medium">{t('title')}</p>
-      {kind === 'prompt' || !isTotal(estimate) ? (
+      {estimate.basis === 'guess' ? (
+        <p>{t('methodGuess')}</p>
+      ) : estimate.basis === 'keyword' ? (
+        <p>{t('methodKeyword', { rate })}</p>
+      ) : kind === 'prompt' || !isTotal(estimate) ? (
         <>
           <p>{t('method', { rate })}</p>
           <p>
@@ -67,13 +71,18 @@ function EstimateNote({ estimate, kind }: { estimate: Estimate; kind: EstimateKi
         </>
       )}
       <p>
-        {estimate.asOf
-          ? t('sources', { month: monthOf(estimate.asOf), rate })
-          : t('sourcesUndated', { rate })}
+        {estimate.basis === 'guess'
+          ? t('sourcesGuess')
+          : estimate.asOf
+            ? t('sources', { month: monthOf(estimate.asOf), rate })
+            : t('sourcesUndated', { rate })}
       </p>
       <p>
         {estimate.asOf
-          ? t('confidence', { level, date: formatDate(estimate.asOf) })
+          ? t(estimate.basis === 'guess' ? 'confidenceSuggested' : 'confidence', {
+              level,
+              date: formatDate(estimate.asOf),
+            })
           : t('confidenceUndated', { level })}
       </p>
       {estimate.stale && <p>{t('stale')}</p>}
@@ -168,12 +177,15 @@ export function EstimateRange({
   estimate,
   kind = 'prompt',
   handle,
+  perMonth = false,
   className,
 }: {
   estimate: Estimate;
   kind?: EstimateKind;
   /** A table's shared note; without one, the range carries its own. */
   handle?: EstimateNoteHandle;
+  /** Adds "/mo" after the range, where nothing else says it is monthly. */
+  perMonth?: boolean;
   className?: string;
 }) {
   const t = useTranslations('volumeEstimate');
@@ -191,6 +203,7 @@ export function EstimateRange({
       )}
     >
       {range}
+      {perMonth && <span className="font-normal">{t('perMonth')}</span>}
     </WithNote>
   );
 }
