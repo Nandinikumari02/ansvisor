@@ -65,8 +65,14 @@ const getSuggestionSourceStates = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/actions/integrations', () => ({ getSuggestionSourceStates }));
 const GA_CONNECTED = { configured: true, connected: true, mapped: true, lastDataAt: '2026-10-20' };
 
-const { getContentPlan, getContentPlanInsights, hidePlanRow, setPlanRowPriority, showPlanRow } =
-  await import('./content-plan');
+const {
+  getContentPlan,
+  getContentPlanInsights,
+  getPlanPriorities,
+  hidePlanRow,
+  setPlanRowPriority,
+  showPlanRow,
+} = await import('./content-plan');
 
 beforeEach(() => {
   reads = {};
@@ -114,6 +120,10 @@ describe('getContentPlan', () => {
           competitorsCited: ['Daily Grind Co.', '', 'Origin Box'],
           visibilityScore: 6,
           prompts: ['p1', 'p2'],
+          assets: [
+            { key: 'a1', type: 'pillar_guide' },
+            { key: 'a2', type: 'backlink' },
+          ],
         },
       },
     ];
@@ -160,6 +170,7 @@ describe('getContentPlan', () => {
           competitorsCited: ['Daily Grind Co.', 'Origin Box'],
           visibility: 6,
           prompts: 2,
+          assetType: 'pillar_guide',
         },
       ],
       drafts: [
@@ -301,6 +312,26 @@ describe('the Plan’s row marks (00229)', () => {
     await expect(showPlanRow(BRAND, 'opportunity:not-an-id')).rejects.toThrow('invalid');
     expect(writes).toEqual([]);
     expect(updateOpportunityStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('getPlanPriorities', () => {
+  const O1 = '44444444-4444-4444-4444-444444444441';
+  const O2 = '44444444-4444-4444-4444-444444444442';
+
+  it('names the opportunities whose Plan rows are a priority', async () => {
+    reads.content_plan_marks = [{ row_key: `opportunity:${O2}` }];
+    await expect(getPlanPriorities(BRAND, [O1, O2, O1, 'not-an-id'])).resolves.toEqual([O2]);
+    expect(filters).toEqual([
+      ['content_plan_marks', 'eq', 'brand_id', BRAND],
+      ['content_plan_marks', 'eq', 'priority', true],
+      ['content_plan_marks', 'in', 'row_key', [`opportunity:${O1}`, `opportunity:${O2}`]],
+    ]);
+  });
+
+  it('reads nothing without an opportunity to look up', async () => {
+    await expect(getPlanPriorities(BRAND, ['x'])).resolves.toEqual([]);
+    expect(filters).toEqual([]);
   });
 });
 

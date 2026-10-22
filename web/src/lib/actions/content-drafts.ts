@@ -294,7 +294,7 @@ export async function getContentStartOptions(brandId: string): Promise<DraftStar
   const [opportunities, prompts, topics] = await Promise.all([
     supabase
       .from('content_opportunities')
-      .select('id, title, decision, brief')
+      .select('id, title, decision, brief, assetType:source_data->assets->0->>type')
       .eq('brand_id', brandId)
       .in('status', OPEN_OPPORTUNITY_STATUSES)
       .order('opportunity_score', { ascending: false, nullsFirst: false })
@@ -321,6 +321,7 @@ export async function getContentStartOptions(brandId: string): Promise<DraftStar
         title: o.title,
         decision: o.decision,
         pageTitle: typeof suggested === 'string' && suggested.trim() ? suggested.trim() : null,
+        assetType: typeof o.assetType === 'string' ? o.assetType : null,
       };
     }),
     prompts: prompts.prompts,
@@ -336,6 +337,40 @@ export async function getContentStartOptions(brandId: string): Promise<DraftStar
       }))
       .filter((topic) => topic.promptCount > 0),
   };
+}
+
+/** How many opportunities one Open draft lookup covers: a page of the list. */
+const MAX_DRAFT_LOOKUPS = 200;
+
+/**
+ * The draft being written for each opportunity (Generate Content's Open
+ * draft): the latest one not yet published started from it, by opportunity
+ * id. Opportunities with none, or that the member can't read, are left out.
+ */
+export async function getOpportunityDrafts(
+  brandId: string,
+  opportunityIds: string[],
+): Promise<Record<string, string>> {
+  const ids = [...new Set(opportunityIds)]
+    .filter((id) => draftId.safeParse(id).success)
+    .slice(0, MAX_DRAFT_LOOKUPS);
+  if (!draftId.safeParse(brandId).success || !ids.length) return {};
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from('content_drafts')
+    .select('id, opportunity_id')
+    .eq('brand_id', brandId)
+    .in('opportunity_id', ids)
+    .in('status', ['draft', 'in_review', 'ready'])
+    .order('updated_at', { ascending: false });
+  if (error) throw new Error(error.message);
+  const drafts: Record<string, string> = {};
+  for (const row of data ?? []) {
+    if (row.opportunity_id && !(row.opportunity_id in drafts)) {
+      drafts[row.opportunity_id] = row.id;
+    }
+  }
+  return drafts;
 }
 
 const startInput = z.object({

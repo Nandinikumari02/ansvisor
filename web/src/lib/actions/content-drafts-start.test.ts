@@ -83,6 +83,7 @@ vi.mock('@/lib/supabase/server', () => ({
 }));
 
 const {
+  getOpportunityDrafts,
   createContentDraft,
   getContentOverlap,
   getContentStartOptions,
@@ -114,8 +115,16 @@ describe('getContentStartOptions', () => {
           title: 'Create a CRM page for real estate',
           decision: 'create',
           brief: { suggestedTitle: ' CRM for real estate teams ' },
+          assetType: 'solution_page',
         },
-        { id: 'o2', title: 'Refresh the pricing page', decision: 'refresh', brief: null },
+        // Written before opportunities had assets.
+        {
+          id: 'o2',
+          title: 'Refresh the pricing page',
+          decision: 'refresh',
+          brief: null,
+          assetType: null,
+        },
       ],
       // Counted in the database: a big brand's topics past the listed prompts too.
       topics: [
@@ -138,8 +147,15 @@ describe('getContentStartOptions', () => {
           title: 'Create a CRM page for real estate',
           decision: 'create',
           pageTitle: 'CRM for real estate teams',
+          assetType: 'solution_page',
         },
-        { id: 'o2', title: 'Refresh the pricing page', decision: 'refresh', pageTitle: null },
+        {
+          id: 'o2',
+          title: 'Refresh the pricing page',
+          decision: 'refresh',
+          pageTitle: null,
+          assetType: null,
+        },
       ],
       prompts: [
         { id: PROMPT, text: 'best crm for realtors', seen: false },
@@ -200,6 +216,41 @@ describe('getContentStartOptions', () => {
   it('throws on a payload the schema doesn’t know, rather than list no prompts', async () => {
     rpcRows = { prompts: 'not a list', seen: 'x' };
     await expect(getContentStartOptions(BRAND)).rejects.toThrow();
+  });
+});
+
+describe('getOpportunityDrafts', () => {
+  it('maps each opportunity to the latest draft not yet published started from it', async () => {
+    reads = {
+      content_drafts: [
+        { id: 'd9', opportunity_id: OPPORTUNITY },
+        { id: 'd3', opportunity_id: OPPORTUNITY },
+        { id: 'd4', opportunity_id: 'o2' },
+      ],
+    };
+    await expect(
+      getOpportunityDrafts(BRAND, [OPPORTUNITY, OPPORTUNITY, 'not-an-id']),
+    ).resolves.toEqual({
+      [OPPORTUNITY]: 'd9',
+      o2: 'd4',
+    });
+    expect(calls).toEqual([
+      {
+        table: 'content_drafts',
+        op: 'select',
+        filters: [
+          ['eq', 'brand_id', BRAND],
+          ['in', 'opportunity_id', [OPPORTUNITY]],
+          ['in', 'status', ['draft', 'in_review', 'ready']],
+        ],
+      },
+    ]);
+  });
+
+  it('reads nothing without an opportunity to look up', async () => {
+    await expect(getOpportunityDrafts(BRAND, [])).resolves.toEqual({});
+    await expect(getOpportunityDrafts('x', [OPPORTUNITY])).resolves.toEqual({});
+    expect(calls).toEqual([]);
   });
 });
 
