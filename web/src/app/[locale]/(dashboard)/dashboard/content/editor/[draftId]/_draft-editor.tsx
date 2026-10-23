@@ -67,7 +67,7 @@ import { detectPageType } from '@/lib/content/page-types';
 import { aiTracesFound, fanoutsToUse, lengthWarns, openRulesForAgent } from '@/lib/content/rules';
 import { saveBlob } from '@/lib/download';
 import { cn } from '@/lib/utils';
-import { AgentBar } from './_agent-bar';
+import { AgentCard } from './_agent-card';
 import { DropOverlay, useAttachments } from './_attach';
 import {
   CITED_EDIT_ALLOWED,
@@ -84,7 +84,7 @@ import { OwnCopies, ownCopyHtml } from './_own-copies';
 import { PageTypeMenu } from './_page-type-menu';
 import type { AgentRewrite } from './_brief-tab';
 import { ruleStatusDetail, type AgentFix, type PageRewrite } from './_rules-tab';
-import { PageRewriteBar, pageChangedSince } from './_page-rewrite';
+import { pageChangedSince } from './_page-rewrite';
 import { EditorPanelRail, EditorSidePanel, useSidePanelOpen, type PanelTab } from './_side-panel';
 import {
   AgentSuggestions,
@@ -572,6 +572,39 @@ export function DraftEditor({
   };
   const openSuggestions = suggestions.filter((s) => s.status === 'open').length;
   const pageSuggestion = suggestions.find((s) => s.kind === 'page') ?? null;
+  // The rules as the agent card counts its gain: met now, and the ones still open.
+  const cardRules = useMemo(
+    () => ({
+      met: rules.met,
+      total: rules.total,
+      open: new Set(
+        rules.rules
+          .filter(({ rule, status }) => rule.on && status.state === 'bad')
+          .map(({ rule }) => rule.key),
+      ),
+    }),
+    [rules.met, rules.total, rules.rules],
+  );
+
+  /**
+   * Review: the first open suggestion in the page's order, scrolled to,
+   * marked for a moment and focused, so the keyboard lands on it too.
+   */
+  const reviewFirst = () => {
+    if (!editor) return;
+    const open = new Set(
+      suggestions.filter((s) => s.status === 'open' && s.kind !== 'page').map((s) => s.id),
+    );
+    const card = [...editor.view.dom.querySelectorAll<HTMLElement>('[data-suggestion]')].find(
+      (node) => open.has(node.dataset.suggestion ?? ''),
+    );
+    if (!card) return;
+    card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    card.querySelector('button')?.focus({ preventScroll: true });
+    const mark = ['ring-2', 'ring-amber-300', 'dark:ring-amber-700'];
+    card.classList.add(...mark);
+    setTimeout(() => card.classList.remove(...mark), 1200);
+  };
 
   /**
    * A whole page rewritten (Rewrite the page to these rules): Accept puts it
@@ -641,7 +674,8 @@ export function DraftEditor({
    * batch of suggestions for review.
    */
   const fixRules = async (only?: string[]) => {
-    if (!editor || fixing || !citedRead) return;
+    // One agent run at a time, and never before the locked passages are read.
+    if (!editor || fixing || starting || rewriting || !citedRead) return;
     if (openSuggestions > 0) {
       toast(t('suggestions.decideFirst'));
       return;
@@ -742,6 +776,14 @@ export function DraftEditor({
             ? t('suggestions.agentBusy')
             : null,
   };
+  // The card's Run Agent says why it won't run, as the Rules card does: also
+  // when the only rules left open are ones the agent doesn't fix (one H1).
+  const agentRules = openRulesForAgent(rules.rules);
+  const cardRunBlocked =
+    agentFix.blocked ??
+    (agentRules.forAgent.length === 0 && agentRules.notForAgent.length > 0
+      ? t('suggestions.notForAgent')
+      : null);
 
   // A drag with files over the page shows where they go; one dropped beside
   // the page (not on its text) goes in at the cursor.
@@ -1204,21 +1246,13 @@ export function DraftEditor({
               </span>
             </p>
           )}
-          {pageSuggestion && !(barClosed && openSuggestions === 0) && (
-            <PageRewriteBar
-              suggestion={pageSuggestion}
-              rulesOpen={Math.max(0, rules.total - rules.met)}
+          {(fixing || (suggestions.length > 0 && !(barClosed && openSuggestions === 0))) && (
+            <AgentCard
+              suggestions={suggestions}
+              rules={cardRules}
               // Not while the HTML view holds the page: it would write over it.
               busy={deciding || htmlSource !== null}
-              onDecide={(to) => void decidePage(pageSuggestion, to)}
-              onClose={() => setBarClosed(true)}
-            />
-          )}
-          {!pageSuggestion && suggestions.length > 0 && !(barClosed && openSuggestions === 0) && (
-            <AgentBar
-              suggestions={suggestions}
-              rulesOpen={Math.max(0, rules.total - rules.met)}
-              busy={deciding}
+              working={fixing}
               onAcceptAll={() =>
                 void decide(
                   suggestions.filter((s) => s.status === 'open').map((s) => s.id),
@@ -1237,9 +1271,13 @@ export function DraftEditor({
                   'undo_all',
                 )
               }
+              onReview={reviewFirst}
+              onRun={() => void fixRules()}
               onClose={() => setBarClosed(true)}
-              onFixRules={() => void fixRules()}
-              fixing={fixing}
+              onDecidePage={(to) => {
+                if (pageSuggestion) void decidePage(pageSuggestion, to);
+              }}
+              runBlocked={cardRunBlocked}
             />
           )}
           {editor && (

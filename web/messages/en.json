@@ -3603,6 +3603,16 @@
           "failed": "The agent couldn't start. Try again in a moment."
         }
       },
+      "agentCard": {
+        "waiting": "{count, plural, one {Content Agent has # suggestion for you} other {Content Agent has # suggestions for you}}",
+        "gain": "Rules {met, number} → {after, number} of {total, number}",
+        "review": "Review",
+        "reviewed": "All suggestions reviewed",
+        "reviewedLine": "{accepted, number} accepted · Rules {met, number} of {total, number}{open, plural, =0 {} other { · # still open}}",
+        "more": "+{count, number} more",
+        "run": "Run Agent",
+        "working": "Content Agent is working"
+      },
       "rewrite": {
         "bar": "Rewritten page",
         "ready": "Content Agent rewrote the page to its rules",
@@ -3617,7 +3627,6 @@
         "accept": "Accept",
         "reject": "Reject",
         "undo": "Undo",
-        "close": "Close",
         "changed": "The page changed after the agent read it. Reject this rewrite and run it again on the page as it is now.",
         "changedAfter": "The page changed after the rewrite was put in. To go back, open History.",
         "acceptedToast": "Rewrite put in place. History keeps your page as it was.",
@@ -3629,10 +3638,7 @@
       "suggestions": {
         "bar": "Agent suggestions",
         "agent": "Content Agent",
-        "suggested": "suggested {count, plural, one {# change} other {# changes}}",
         "fromAction": "from Action AC-{no}",
-        "decided": "{accepted} accepted · {rejected} rejected",
-        "rulesOpen": "{count, plural, one {# rule still open} other {# rules still open}}",
         "runMax": "a run makes at most {max} changes: run it again for the rest",
         "acceptAll": "Accept all",
         "rejectAll": "Reject all",
@@ -3654,8 +3660,6 @@
         "notApplied": "{count, plural, one {# suggestion couldn't be applied} other {# suggestions couldn't be applied}}: the page changed there, AI quotes the passage, or a heading would get too long.",
         "saveFailed": "Couldn't keep the decision. Try again.",
         "htmlBlocked": "Accept or reject the {count, plural, one {# agent suggestion} other {# agent suggestions}} first, then edit as HTML.",
-        "fixRules": "Apply rules with Agent",
-        "fixing": "Content Agent is working…",
         "fixed": "{count, plural, one {Content Agent suggested # change} other {Content Agent suggested # changes}} · review them in the page",
         "fixedMax": "Content Agent suggested {count} changes, the most one run makes · review them, then run it again for the rules still open",
         "nothingToFix": "Content Agent found nothing it could change without new facts.",
