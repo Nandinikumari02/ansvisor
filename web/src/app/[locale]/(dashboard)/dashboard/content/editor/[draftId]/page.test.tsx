@@ -2172,6 +2172,124 @@ describe('the side panel', () => {
     }
   });
 
+  describe('Quality (CE-036/039)', () => {
+    const readable = draft({
+      bodyHtml:
+        '<h1>How do small teams forecast pipeline?</h1>' +
+        '<p>Small teams forecast pipeline by looking at the deals they can close this month. They count each deal once and check it every week.</p>' +
+        '<h2>Start with the deals you trust</h2>' +
+        '<p>Pick the deals with a clear next step. Leave out the ones that went quiet. Write down the date you expect each one to close.</p>' +
+        '<h2>Check the numbers every week</h2>' +
+        '<p>Look at the list on the same day each week. Move a deal out when it slips. Add new deals only when the buyer has agreed to a date.</p>',
+    });
+    afterEach(() => {
+      delete process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE;
+    });
+
+    it('shows nothing of Quality until its first phase is live', async () => {
+      getContentDraft.mockResolvedValue(readable);
+      window.innerWidth = 1440;
+      await renderPage();
+      expect(container.querySelector('header')!.textContent).not.toContain('Quality');
+      expect(
+        [...panel()!.querySelectorAll('[role="radio"]')].map((el) => el.textContent),
+      ).not.toContainEqual(expect.stringContaining('Quality'));
+    });
+
+    it('scores the page as written, in the header and Instructions › Quality', async () => {
+      process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '1';
+      getContentDraft.mockResolvedValue(readable);
+      window.innerWidth = 1440;
+      await renderPage();
+      const chip = [...container.querySelectorAll<HTMLButtonElement>('header button')].find((b) =>
+        b.textContent?.startsWith('Quality'),
+      )!;
+      // Its band is read out too, not only shown in colour.
+      expect(chip.textContent).toMatch(/^Quality \d+ · (Strong|Can improve|Needs work)$/);
+      await act(async () => chip.click());
+      expect(selectedSegment()).toMatch(/^Quality\d+ · (Strong|Can improve|Needs work)$/);
+      expect(panel()!.textContent).toContain('Readability');
+      expect(panel()!.textContent).toContain('Not a Google score.');
+    });
+
+    /** The draft above, its Language rule changed for this draft. */
+    const inLanguage = (language: { on?: boolean; value?: string }) => ({
+      ...readable,
+      rules: { set: null, source: 'default' as const, overrides: { language }, textRules: [] },
+    });
+    const qualityChip = () =>
+      [...container.querySelectorAll<HTMLButtonElement>('header button')].find((b) =>
+        b.textContent?.startsWith('Quality'),
+      );
+
+    it('reads the page in its Language rule’s language, not the brand’s', async () => {
+      process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '1';
+      // The brand writes in Japanese; this draft is in English, and is scored.
+      brandState.brands = [{ id: 'b1', language: 'ja' } as never, { id: 'b2' }];
+      try {
+        getContentDraft.mockResolvedValue(inLanguage({ value: 'English (US)' }));
+        window.innerWidth = 1440;
+        await renderPage();
+        expect(qualityChip()?.textContent).toMatch(/^Quality \d+/);
+      } finally {
+        brandState.brands = [{ id: 'b1' }, { id: 'b2' }];
+      }
+    });
+
+    it('reads the brand’s language with the rule off, and says when it can’t read it yet', async () => {
+      process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '1';
+      brandState.brands = [{ id: 'b1', language: 'ja' } as never, { id: 'b2' }];
+      try {
+        getContentDraft.mockResolvedValue(inLanguage({ on: false, value: 'English (US)' }));
+        window.innerWidth = 1440;
+        await renderPage();
+        // Japanese has no spaces between words: no score, and no chip.
+        expect(qualityChip()).toBeUndefined();
+        const segment = [...panel()!.querySelectorAll<HTMLElement>('[role="radio"]')].find((el) =>
+          el.textContent?.startsWith('Quality'),
+        )!;
+        await act(async () => segment.click());
+        expect(panel()!.textContent).toContain("Readability isn't read for this language yet.");
+      } finally {
+        brandState.brands = [{ id: 'b1' }, { id: 'b2' }];
+      }
+    });
+
+    it('marks the passage Show goes to for a moment, a second Show starting it again', async () => {
+      process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '1';
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const original = Element.prototype.scrollIntoView;
+      Element.prototype.scrollIntoView = vi.fn();
+      try {
+        const long = `Teams ${Array.from({ length: 39 }, () => 'plan').join(' ')}.`;
+        getContentDraft.mockResolvedValue({
+          ...readable,
+          bodyHtml: `${readable.bodyHtml}<p>${long}</p>`,
+        });
+        window.innerWidth = 1440;
+        await renderPage();
+        await act(async () => qualityChip()!.click());
+        const show = [...panel()!.querySelectorAll<HTMLButtonElement>('li button')].find(
+          (b) => b.textContent === 'Show',
+        )!;
+        const marked = () => container.querySelector('.ProseMirror .ring-amber-300');
+
+        await act(async () => show.click());
+        expect(marked()!.textContent).toBe(long);
+        await act(async () => vi.advanceTimersByTime(1000));
+        await act(async () => show.click());
+        // The first Show's timer doesn't take the second's mark away early.
+        await act(async () => vi.advanceTimersByTime(500));
+        expect(marked()).not.toBeNull();
+        await act(async () => vi.advanceTimersByTime(700));
+        expect(marked()).toBeNull();
+      } finally {
+        Element.prototype.scrollIntoView = original;
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('Run Agent: fix open rules', () => {
     const traced = draft({
       pageType: 'blog_post',

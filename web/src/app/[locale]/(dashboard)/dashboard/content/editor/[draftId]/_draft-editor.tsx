@@ -70,11 +70,15 @@ import {
 import { PAGE_READ_DELAY_MS, draftTitleFromDoc, safeLinkHref } from '@/lib/content/editor';
 import { JsonLd } from '@/lib/content/json-ld-node';
 import { detectPageType } from '@/lib/content/page-types';
+import { BAND_CLASSES, qualityAverage, qualityBand, qualityPhase } from '@/lib/content/quality';
+import { readability } from '@/lib/content/readability';
 import { aiTracesFound, fanoutsToUse, lengthWarns, openRulesForAgent } from '@/lib/content/rules';
 import { saveBlob } from '@/lib/download';
 import { cn } from '@/lib/utils';
+import { useBrandStore } from '@/stores/use-brand-store';
 import { AgentCard } from './_agent-card';
 import { AgentDrafting, draftingKey } from './_agent-drafting';
+import { FlashBlock, findBlock, flashKey } from './_flash-block';
 import { useAgentRun } from './_use-agent-run';
 import { WorkingDots } from './_working-dots';
 import { DropOverlay, useAttachments } from './_attach';
@@ -203,6 +207,8 @@ export function DraftEditor({
   // The page as written now, for the side panel's Sources.
   const [pageHtml, setPageHtml] = useState(draft.bodyHtml);
   const pageReadTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Quality's Show marks a block for a moment: a second Show starts the moment again.
+  const flashTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(pageReadTimer.current), []);
   const [status, setStatus] = useState(draft.status);
   const [marking, setMarking] = useState(false);
@@ -316,6 +322,7 @@ export function DraftEditor({
       }),
       OneH1,
       AgentDrafting,
+      FlashBlock,
     ],
     content: draft.bodyHtml,
     // Rendered on the client only, so the server's HTML can't disagree with it.
@@ -388,6 +395,22 @@ export function DraftEditor({
     pageType,
     reads,
   });
+  // How well the page reads as written (Quality spec, CE-036/039): read in the
+  // browser, no AI cost; off until Quality's first phase is live. Read in the
+  // language the page is written in: its Language rule when that is on (the
+  // agent writes in it, and it can differ per draft), else the brand's.
+  const brandLanguage = useBrandStore(
+    (s) => s.brands.find((b) => b.id === draft.brandId)?.language,
+  );
+  const languageRule = rules.rules.find(({ rule }) => rule.key === 'language')?.rule;
+  const language =
+    languageRule?.on && languageRule.current.trim() ? languageRule.current : brandLanguage;
+  const qualityOn = qualityPhase() >= 1;
+  const readable = useMemo(
+    () => (qualityOn ? readability(pageHtml, language) : null),
+    [qualityOn, pageHtml, language],
+  );
+  const qualityScore = qualityAverage([readable?.score ?? null]);
   useEffect(() => {
     attachRef.current = (files) => void attachments.attach(files);
     onDecide.current = (id, decision) => void decide([id], decision);
@@ -710,6 +733,25 @@ export function DraftEditor({
     const mark = ['ring-2', 'ring-amber-300', 'dark:ring-amber-700'];
     card.classList.add(...mark);
     setTimeout(() => card.classList.remove(...mark), 1200);
+  };
+
+  /**
+   * Quality's Show: the block of the page holding the passage (never a
+   * suggestion's card), scrolled to and marked for a moment.
+   */
+  const showInPage = (text: string) => {
+    if (!editor) return;
+    const at = findBlock(editor.state.doc, text);
+    if (!at) return;
+    (editor.view.nodeDOM(at.from) as HTMLElement | null)?.scrollIntoView({
+      block: 'center',
+      behavior: 'smooth',
+    });
+    clearTimeout(flashTimer.current);
+    editor.view.dispatch(editor.state.tr.setMeta(flashKey, at));
+    flashTimer.current = setTimeout(() => {
+      if (!editor.isDestroyed) editor.view.dispatch(editor.state.tr.setMeta(flashKey, null));
+    }, 1200);
   };
 
   /**
@@ -1341,6 +1383,24 @@ export function DraftEditor({
             <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
             {t('rulesChip', { met: rules.met, total: rules.total })}
           </button>
+          {qualityScore !== null && (
+            <button
+              type="button"
+              onClick={() => openPanelTab('quality')}
+              title={t('qualityChipHint')}
+              className={cn(
+                'inline-flex h-5 shrink-0 items-center gap-1.5 rounded-full border px-2 text-xs font-medium tabular-nums',
+                BAND_CLASSES[qualityBand(qualityScore)],
+              )}
+            >
+              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+              {t('qualityChip', { score: qualityScore })}
+              <span className="sr-only">
+                {' · '}
+                {t(`quality.bands.${qualityBand(qualityScore)}`)}
+              </span>
+            </button>
+          )}
           {citedCount > 0 && (
             <span
               title={t('cited.chipHint')}
@@ -1515,6 +1575,8 @@ export function DraftEditor({
             }
             onBriefRebuilding={onBriefRebuilding}
             briefBlocked={agentBusy && !briefRebuilding ? t('suggestions.agentBusy') : null}
+            readability={readable}
+            onShowInPage={showInPage}
           />
         ) : (
           <EditorPanelRail onOpen={openPanelTab} />
