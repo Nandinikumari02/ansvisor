@@ -33,12 +33,14 @@ export class PageFetchError extends Error {
   /**
    * @param {'invalid_url'|'blocked'|'unreachable'|'timeout'|'too_large'|'not_html'|'http_error'|'too_many_redirects'} code
    * @param {string} message
-   * @param {{ status?: number }} [extra]
+   * @param {{ status?: number, errno?: string }} [extra] errno: the network error's code
+   *   (ENOTFOUND, ECONNREFUSED, a TLS one…) when the page couldn't be reached
    */
   constructor(code, message, extra = {}) {
     super(message);
     this.code = code;
     this.status = extra.status;
+    this.errno = extra.errno;
   }
 }
 
@@ -151,8 +153,11 @@ function decode(buffer, contentType) {
   }
 }
 
-/** One request, no redirects followed: the response, or where it redirects to. */
-function requestOnce(url, { signal, lookup, maxBytes }) {
+/**
+ * One request, no redirects followed: the response, or where it redirects to.
+ * A body over `maxBytes` is refused, or with `truncate` cut off there.
+ */
+function requestOnce(url, { signal, lookup, maxBytes, truncate }) {
   return new Promise((resolve, reject) => {
     const client = url.protocol === 'https:' ? https : http;
     const req = client.request(
@@ -170,19 +175,20 @@ function requestOnce(url, { signal, lookup, maxBytes }) {
       },
       (res) => {
         const status = res.statusCode ?? 0;
+        // What isn't read is dropped, not drained: a large file stops here.
         if (status >= 300 && status < 400 && res.headers.location) {
-          res.resume();
+          res.destroy();
           resolve({ redirect: res.headers.location, status });
           return;
         }
         if (status < 200 || status >= 300) {
-          res.resume();
+          res.destroy();
           reject(new PageFetchError('http_error', `The page answered ${status}`, { status }));
           return;
         }
         const contentType = res.headers['content-type'] ?? '';
         if (!/^\s*(text\/html|application\/xhtml\+xml)\b/i.test(contentType)) {
-          res.resume();
+          res.destroy();
           reject(new PageFetchError('not_html', `The address is ${contentType || 'not a page'}`));
           return;
         }
@@ -194,10 +200,19 @@ function requestOnce(url, { signal, lookup, maxBytes }) {
 
         const chunks = [];
         let size = 0;
+        let full = false;
         body.on('data', (chunk) => {
+          if (full) return;
           size += chunk.length;
           if (size > maxBytes) {
+            full = true;
             req.destroy();
+            if (truncate) {
+              // The start of the page, up to the cap: the rest is never read.
+              chunks.push(chunk.subarray(0, chunk.length - (size - maxBytes)));
+              resolve({ status, contentType, body: decode(Buffer.concat(chunks), contentType) });
+              return;
+            }
             reject(new PageFetchError('too_large', 'The page is too large to read'));
             return;
           }
@@ -218,8 +233,10 @@ function requestOnce(url, { signal, lookup, maxBytes }) {
  * A web page's HTML, fetched safely (see above).
  *
  * @param {string} address
- * @param {{ timeoutMs?: number, maxBytes?: number, maxRedirects?: number, lookup?: Function, ports?: string[], signal?: AbortSignal }} [opts]
+ * @param {{ timeoutMs?: number, maxBytes?: number, truncate?: boolean, maxRedirects?: number, lookup?: Function, ports?: string[], signal?: AbortSignal }} [opts]
  *   `signal` ends the read early too (a run's Stop), as its timeout does.
+ *   `truncate` reads a page over `maxBytes` up to it, instead of refusing it
+ *   ('too_large'), for a caller that needs only its start.
  *   `lookup` and `ports` replace the public-only lookup and the web ports;
  *   tests use them to reach a local server.
  * @returns {Promise<{ url: string, status: number, html: string }>} url is the address after redirects
@@ -228,6 +245,7 @@ export async function fetchPage(address, opts = {}) {
   const {
     timeoutMs = FETCH_TIMEOUT_MS,
     maxBytes = MAX_PAGE_BYTES,
+    truncate = false,
     maxRedirects = MAX_REDIRECTS,
     lookup = publicOnlyLookup,
     ports = WEB_PORTS,
@@ -240,7 +258,7 @@ export async function fetchPage(address, opts = {}) {
   for (let hops = 0; ; hops += 1) {
     let res;
     try {
-      res = await requestOnce(url, { signal, lookup, maxBytes });
+      res = await requestOnce(url, { signal, lookup, maxBytes, truncate });
     } catch (err) {
       if (err instanceof PageFetchError) throw err;
       if (signal.aborted) throw new PageFetchError('timeout', 'The page took too long to answer');
@@ -248,6 +266,7 @@ export async function fetchPage(address, opts = {}) {
       throw new PageFetchError(
         'unreachable',
         `The page could not be reached (${err?.code ?? err?.message})`,
+        { errno: err?.code },
       );
     }
     if (!res.redirect) return { url: url.toString(), status: res.status, html: res.body };

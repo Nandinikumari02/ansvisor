@@ -1,10 +1,13 @@
 import { Router } from 'express';
+import * as cheerio from 'cheerio';
 import { z } from 'zod';
 import supabaseAdmin from '../config/supabase.js';
 import { assertBrandAccess } from '../lib/access.js';
 import { onBrandDomain } from '../lib/audit/host.js';
+import { checkLinks, reserveReads } from '../lib/link-check.js';
 import { MAX_CONTENT_LENGTH, extractPageContent } from '../lib/page-content.js';
 import { PageFetchError, fetchPage } from '../lib/safe-fetch.js';
+import { linkCheckLimiter } from '../middleware/rate-limiter.js';
 
 /**
  * Pages brought into the Content Editor (CE-003): Optimize content › Page
@@ -79,6 +82,50 @@ router.post('/import', async (req, res) => {
     }
     req.log.error({ err }, 'content page import error');
     return res.status(500).json({ error: 'Failed to read the page', code: 'failed' });
+  }
+});
+
+const linksBody = z.object({ draftId: z.guid() });
+
+/**
+ * The links of a saved draft, for Quality's Trust (Quality spec §2.2):
+ * whether each answers and how old its page is (link-check.js). Any member
+ * of the draft's brand may ask; the links are read from the draft as saved,
+ * never from the request, through the same guarded fetch, at most once a
+ * day each and HOURLY_READS an hour per member (link-check.js). `skipped`
+ * are the links it never reads (relative, one-time or account links).
+ */
+router.post('/links', linkCheckLimiter, async (req, res) => {
+  const parsed = linksBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'invalid', code: 'invalid' });
+  try {
+    const { data: draft, error } = await supabaseAdmin
+      .from('content_drafts')
+      .select('brand_id, body_html')
+      .eq('id', parsed.data.draftId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!draft) return res.status(404).json({ error: 'Draft not found', code: 'not_found' });
+    await assertBrandAccess(draft.brand_id, req.user.id);
+
+    const $ = cheerio.load(draft.body_html ?? '');
+    const hrefs = $('a[href]')
+      .map((_, el) => $(el).attr('href'))
+      .get();
+    const { reads, skipped } = await checkLinks(hrefs, {
+      reserve: (wanted) => reserveReads(req.user.id, wanted),
+      log: req.log,
+    });
+    return res.json({
+      links: [...reads].map(([href, read]) => ({ href, ...read })),
+      skipped,
+    });
+  } catch (err) {
+    if (err?.status === 403 || err?.status === 404) {
+      return res.status(err.status).json({ error: err.message, code: 'forbidden' });
+    }
+    req.log.error({ err }, 'content link check error');
+    return res.status(500).json({ error: 'Failed to check the links', code: 'failed' });
   }
 });
 
