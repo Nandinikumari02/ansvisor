@@ -3,7 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { NextIntlClientProvider } from 'next-intl';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import messages from '../../../../../../../../messages/en.json';
-import { eeat } from '@/lib/content/quality-checks';
+import { eeat, trust, trustBlocks, type LinkCheck } from '@/lib/content/quality-checks';
 import type { ContentAuthor } from '@/lib/content/authors';
 import type { Readability } from '@/lib/content/readability';
 
@@ -202,6 +202,91 @@ describe('QualityTab', () => {
     await render(read({ score: null, checks: [], words: 12 }));
     expect(container.textContent).toContain('Write a few paragraphs');
     expect(container.textContent).not.toContain('Nothing to raise');
+  });
+
+  it('asks to source figures, swap stale sources and fix links, each with Show', async () => {
+    const html =
+      '<p>Win rates rose 42% last year.</p>' +
+      '<p>See <a href="https://old.example/">this study</a> and <a href="https://gone.example/">that one</a>.</p>';
+    const links = new Map<string, LinkCheck>([
+      [
+        'https://old.example/',
+        {
+          href: 'https://old.example/',
+          status: 'ok',
+          httpStatus: 200,
+          date: '2020-01-01T00:00:00.000Z',
+        },
+      ],
+      [
+        'https://gone.example/',
+        { href: 'https://gone.example/', status: 'broken', httpStatus: 404, date: null },
+      ],
+    ]);
+    const result = trust({
+      blocks: trustBlocks(html),
+      links,
+      brandDomains: ['acme.com'],
+      now: Date.parse('2026-10-23T12:00:00Z'),
+    });
+    await render({ ...read(null), trust: result });
+    const scores = container.querySelector('[aria-label="Quality scores"]')!;
+    // Figures 0 of 30, fresh 0 of 7, links 1.5 of 3: 4 of 100.
+    expect(scores.textContent).toContain('Trust4Needs work');
+    const rows = [...container.querySelectorAll('li')].map((li) => li.textContent);
+    expect(rows).toContainEqual(expect.stringContaining('1 sentence with a figure has no source'));
+    expect(rows).toContainEqual(
+      expect.stringContaining('1 of 1 dated source is over 24 months old'),
+    );
+    expect(rows).toContainEqual(
+      expect.stringContaining("1 link doesn't workFix or remove it: https://gone.example/Show"),
+    );
+    const figure = [...container.querySelectorAll('li')].find((li) =>
+      li.textContent?.includes('figure'),
+    )!;
+    await act(async () => figure.querySelector('button')!.click());
+    expect(onShow).toHaveBeenCalledWith('Win rates rose 42% last year.');
+  });
+
+  it('lists a broken link before Trust is scored, its gain out of the Phase 1 points', async () => {
+    const result = trust({
+      blocks: trustBlocks('<p>See <a href="https://gone.example/">that one</a>.</p>'),
+      links: new Map<string, LinkCheck>([
+        [
+          'https://gone.example/',
+          { href: 'https://gone.example/', status: 'broken', httpStatus: 404, date: null },
+        ],
+      ]),
+      brandDomains: ['acme.com'],
+      now: Date.parse('2026-10-23T12:00:00Z'),
+    });
+    await render({ ...read(null), trust: result });
+    const scores = container.querySelector('[aria-label="Quality scores"]')!;
+    expect(scores.textContent).toContain('TrustNot scored yet');
+    const rows = [...container.querySelectorAll('li')].map((li) => li.textContent);
+    // 3 of the 40 Phase 1 points.
+    expect(rows).toContainEqual(expect.stringContaining("+8 Trust1 link doesn't work"));
+  });
+
+  it('counts the dated sources and the stale ones each in its own number', async () => {
+    const dated = (date: string) => ({ status: 'ok' as const, httpStatus: 200, date });
+    const result = trust({
+      blocks: trustBlocks(
+        '<p>See <a href="https://a.example/">a</a>, <a href="https://b.example/">b</a> and <a href="https://c.example/">c</a>.</p>',
+      ),
+      links: new Map<string, LinkCheck>([
+        ['https://a.example/', { href: 'https://a.example/', ...dated('2020-01-01T00:00:00Z') }],
+        ['https://b.example/', { href: 'https://b.example/', ...dated('2021-01-01T00:00:00Z') }],
+        ['https://c.example/', { href: 'https://c.example/', ...dated('2026-01-01T00:00:00Z') }],
+      ]),
+      brandDomains: ['acme.com'],
+      now: Date.parse('2026-10-23T12:00:00Z'),
+    });
+    await render({ ...read(null), trust: result });
+    const rows = [...container.querySelectorAll('li')].map((li) => li.textContent);
+    expect(rows).toContainEqual(
+      expect.stringContaining('2 of 3 dated sources are over 24 months old'),
+    );
   });
 
   it('says when the page’s language isn’t read yet, not that it is too short', async () => {
