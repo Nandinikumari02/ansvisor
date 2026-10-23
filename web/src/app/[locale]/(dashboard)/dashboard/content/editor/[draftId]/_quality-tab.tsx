@@ -1,6 +1,7 @@
 'use client';
 
 import { useFormatter, useTranslations } from 'next-intl';
+import { Check } from 'lucide-react';
 import { Link } from '@/i18n/navigation';
 import { Button, buttonVariants } from '@/components/ui/button';
 import type { ContentAuthor } from '@/lib/content/authors';
@@ -8,12 +9,12 @@ import { BAND_CLASSES, qualityBand } from '@/lib/content/quality';
 import {
   authorProfile,
   FRESH_MONTHS,
-  scoreGain,
   trustGain,
   type EeatCheckId,
   type Score,
   type TrustRead,
 } from '@/lib/content/quality-checks';
+import type { QualityTodo } from '@/lib/content/quality-todos';
 import {
   readabilityGain,
   SECTION_WORDS,
@@ -41,28 +42,29 @@ export interface QualityRead {
   brandName: string;
   /** The site's trust in Site Audit (CE-043), or null while not read. */
   siteTrust: SiteTrust | null;
+  /** What only the person can do (qualityTodos, CE-040). */
+  todos: QualityTodo[];
 }
 
 type ScoreName = 'eeat' | 'trust' | 'readability';
 
 interface Suggestion {
   key: string;
-  score: ScoreName;
+  // E-E-A-T's are the person's to-dos.
+  score: Exclude<ScoreName, 'eeat'>;
   gain: number;
   line: string;
   detail: string;
-  action:
-    | { kind: 'show'; text: string }
-    | { kind: 'pickAuthor' }
-    | { kind: 'manageAuthors'; label: 'addAuthor' | 'editAuthor' }
-    | { kind: 'none' };
+  /** The passage Show goes to, if any. */
+  show: string | null;
 }
 
 /**
  * Instructions › Quality (Quality spec §3, CE-039): the three scores read
  * from the draft and its author, each labelled an Ansvisor estimate, then
- * what would raise them, the biggest gain first. A score shows once one of
- * its checks is live for the page.
+ * what only the person can do (Your to-dos, CE-040) and what would raise
+ * them, the biggest gain first. A score shows once one of its checks is
+ * live for the page.
  */
 export function QualityTab({
   quality,
@@ -76,7 +78,6 @@ export function QualityTab({
   onPickAuthor: () => void;
 }) {
   const t = useTranslations('contentEditor.editor.quality');
-  const tAuthor = useTranslations('contentEditor.editor.author');
   const tSite = useTranslations('audit.siteTrust.checks');
   const format = useFormatter();
   const { readability, eeat, trust, siteTrust } = quality;
@@ -86,13 +87,14 @@ export function QualityTab({
     { name: 'trust', score: trust?.score ?? null, empty: t('notScored') },
     { name: 'readability', score: readability?.score ?? null, empty: t('tooShortShort') },
   ];
-  const suggestions = [
-    ...readabilitySuggestions(t, readability),
-    ...eeatSuggestions(t, quality, tAuthor('organization', { brand: quality.brandName })),
-    ...trustSuggestions(t, trust),
-  ]
+  const { todos } = quality;
+  const todosLeft = todos.filter((todo) => !todo.done).length;
+  const suggestions = [...readabilitySuggestions(t, readability), ...trustSuggestions(t, trust)]
     .filter((s) => s.gain > 0)
     .sort((a, b) => b.gain - a.gain);
+  // Every live check has its points: none to raise, none of the person's left
+  // (a page too short to read says so instead).
+  const allDone = suggestions.length === 0 && todosLeft === 0 && readability?.score !== null;
 
   return (
     <div className="space-y-4 text-sm">
@@ -127,32 +129,54 @@ export function QualityTab({
         )}
       </section>
 
-      <section aria-label={t('suggestionsLabel')} className="space-y-2">
-        <h4 className="text-xs font-medium text-muted-foreground">{t('suggestionsLabel')}</h4>
-        {suggestions.length === 0 ? (
-          // A page too short to read says so above.
-          readability?.score !== null && (
-            <p className="text-xs text-muted-foreground">{t('nothingToRaise')}</p>
-          )
-        ) : (
+      {todos.length > 0 && (
+        <section aria-label={t('todos.title')} className="space-y-2">
+          <h4 className="text-xs text-muted-foreground">
+            <span className="font-medium">{t('todos.title')}</span>{' '}
+            {t('todos.left', { count: todosLeft })}
+          </h4>
           <ul className="space-y-2">
-            {suggestions.map((s) => (
-              <li key={s.key} className="flex items-start gap-2.5 rounded-xl border px-3 py-2.5">
-                <span className="mt-0.5 shrink-0 rounded-md bg-emerald-50 px-1.5 text-[11px] font-medium text-emerald-700 tabular-nums dark:bg-emerald-950 dark:text-emerald-300">
-                  {t('gain', { gain: s.gain, score: t(`names.${s.score}`) })}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="font-medium [overflow-wrap:anywhere]">{s.line}</p>
-                  <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
-                    {s.detail}
-                  </p>
-                </div>
-                <SuggestionAction action={s.action} onShow={onShow} onPickAuthor={onPickAuthor} />
-              </li>
+            {todos.map((todo) => (
+              <TodoRow key={todo.id} todo={todo} quality={quality} onPickAuthor={onPickAuthor} />
             ))}
           </ul>
-        )}
-      </section>
+        </section>
+      )}
+
+      {(suggestions.length > 0 || allDone) && (
+        <section aria-label={t('suggestionsLabel')} className="space-y-2">
+          <h4 className="text-xs font-medium text-muted-foreground">{t('suggestionsLabel')}</h4>
+          {allDone ? (
+            <p className="text-xs text-muted-foreground">{t('nothingToRaise')}</p>
+          ) : (
+            <ul className="space-y-2">
+              {suggestions.map((s) => (
+                <li key={s.key} className="flex items-start gap-2.5 rounded-xl border px-3 py-2.5">
+                  <span className="mt-0.5 shrink-0 rounded-md bg-emerald-50 px-1.5 text-[11px] font-medium text-emerald-700 tabular-nums dark:bg-emerald-950 dark:text-emerald-300">
+                    {t('gain', { gain: s.gain, score: t(`names.${s.score}`) })}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium [overflow-wrap:anywhere]">{s.line}</p>
+                    <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                      {s.detail}
+                    </p>
+                  </div>
+                  {s.show !== null && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0"
+                      onClick={() => onShow(s.show!)}
+                    >
+                      {t('show')}
+                    </Button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
 
       {siteTrust && (
         <section
@@ -182,47 +206,133 @@ export function QualityTab({
   );
 }
 
-/** A suggestion's one button. */
-function SuggestionAction({
-  action,
-  onShow,
+/** A to-do's words: its title, the nudge's "Next for you" phrase and its detail line. */
+export function useTodoCopy() {
+  const t = useTranslations('contentEditor.editor.quality.todos');
+  const tAuthor = useTranslations('contentEditor.editor.author');
+  return (
+    todo: QualityTodo,
+    { author, brandName, canEdit }: Pick<QualityRead, 'author' | 'brandName' | 'canEdit'>,
+  ) => {
+    if (todo.id === 'byline') {
+      const action = todo.action === 'addAuthor' ? 'addAuthor' : 'pickAuthor';
+      return {
+        title: t(`byline.title.${action}`),
+        next: t(`byline.next.${action}`),
+        detail:
+          todo.done && author
+            ? t('byline.done', { name: author.name })
+            : action === 'addAuthor'
+              ? t('byline.detail.addAuthor')
+              : t('byline.detail.pickAuthor', {
+                  byline: tAuthor('organization', { brand: brandName }),
+                }),
+      };
+    }
+    if (!author) {
+      return {
+        title: t('authorProfile.titleNoAuthor'),
+        next: t('authorProfile.nextNoAuthor'),
+        detail: t('authorProfile.detail.noAuthor'),
+      };
+    }
+    const { bio, links } = authorProfile(author);
+    const missing = !bio && !links ? 'both' : !bio ? 'bio' : 'links';
+    return {
+      title: t('authorProfile.title', { name: author.name }),
+      next: t('authorProfile.next', { name: author.name }),
+      // Only whoever can edit the author is sent to; anyone else is told who can.
+      detail: todo.done
+        ? t('authorProfile.done')
+        : canEdit
+          ? t(`authorProfile.detail.${missing}`)
+          : t(`authorProfile.askOthers.${missing}`, {
+              name: author.name,
+              member: author.userId ? 'yes' : 'no',
+            }),
+    };
+  };
+}
+
+/**
+ * A to-do: its box (checked once done, which the checks decide), what to
+ * do, what it adds, and its one button while open.
+ */
+function TodoRow({
+  todo,
+  quality,
   onPickAuthor,
 }: {
-  action: Suggestion['action'];
-  onShow: (text: string) => void;
+  todo: QualityTodo;
+  quality: QualityRead;
   onPickAuthor: () => void;
 }) {
   const t = useTranslations('contentEditor.editor.quality');
-  switch (action.kind) {
-    case 'show':
-      return (
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 shrink-0"
-          onClick={() => onShow(action.text)}
+  const { title, detail } = useTodoCopy()(todo, quality);
+  return (
+    <li
+      className={cn(
+        'flex items-start gap-2.5 rounded-xl border px-3 py-2.5',
+        todo.done && 'bg-muted/40',
+      )}
+    >
+      <span
+        aria-hidden
+        className={cn(
+          'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border',
+          todo.done
+            ? 'border-emerald-600 bg-emerald-600 text-white dark:border-emerald-500 dark:bg-emerald-500 dark:text-emerald-950'
+            : 'border-input bg-background',
+        )}
+      >
+        {todo.done && <Check className="h-3 w-3" />}
+      </span>
+      <div className="min-w-0 flex-1">
+        <p
+          className={cn(
+            'font-medium [overflow-wrap:anywhere]',
+            todo.done && 'text-muted-foreground line-through',
+          )}
         >
-          {t('show')}
-        </Button>
-      );
-    case 'pickAuthor':
-      return (
-        <Button variant="outline" size="sm" className="h-7 shrink-0" onClick={onPickAuthor}>
-          {t('pickAuthor')}
-        </Button>
-      );
-    case 'manageAuthors':
-      return (
-        <Link
-          href={MANAGE_AUTHORS_PATH}
-          className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'h-7 shrink-0')}
+          {title}
+          <span className="sr-only">
+            {' · '}
+            {todo.done ? t('todos.done') : t('todos.open')}
+          </span>
+        </p>
+        <p
+          className={cn(
+            'text-xs text-muted-foreground [overflow-wrap:anywhere]',
+            todo.done && 'line-through',
+          )}
         >
-          {t(action.label)}
-        </Link>
-      );
-    case 'none':
-      return null;
-  }
+          {detail}
+          {!todo.done && todo.gain > 0 && (
+            <>
+              {' · '}
+              <span className="font-medium whitespace-nowrap text-emerald-700 tabular-nums dark:text-emerald-300">
+                {t('gain', { gain: todo.gain, score: t('names.eeat') })}
+              </span>
+            </>
+          )}
+        </p>
+      </div>
+      {!todo.done &&
+        todo.action &&
+        (todo.action === 'pickAuthor' ? (
+          <Button variant="outline" size="sm" className="h-7 shrink-0" onClick={onPickAuthor}>
+            {t('pickAuthor')}
+          </Button>
+        ) : (
+          <Link
+            href={MANAGE_AUTHORS_PATH}
+            className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'h-7 shrink-0')}
+          >
+            {t(todo.action)}
+          </Link>
+        ))}
+    </li>
+  );
 }
 
 type T = ReturnType<typeof useTranslations<'contentEditor.editor.quality'>>;
@@ -236,50 +346,9 @@ function readabilitySuggestions(t: T, readability: Readability | null): Suggesti
       gain: readabilityGain(readability, check.id),
       line: line(t, check),
       detail: detail(t, check),
-      action: check.at ? { kind: 'show', text: check.at } : { kind: 'none' },
+      show: check.at || null,
     }),
   );
-}
-
-/**
- * E-E-A-T's: with no person on the page, picking one is the fix (its gain is
- * the byline's: what the author's profile adds depends on them), or adding
- * one when the workspace has none; with one, completing their profile. Only
- * whoever added the author, the author themself or an admin can, so anyone
- * else is told who to ask instead of being sent where they can't edit.
- */
-function eeatSuggestions(t: T, quality: QualityRead, teamByline: string): Suggestion[] {
-  const { eeat, author, canEdit, hasAuthors } = quality;
-  if (!eeat || eeat.score === null) return [];
-  if (!author) {
-    return [
-      {
-        key: 'eeat:byline',
-        score: 'eeat',
-        gain: scoreGain(eeat, ['byline']),
-        line: t('checks.byline.line', { byline: teamByline }),
-        detail: t('checks.byline.detail'),
-        action: hasAuthors ? { kind: 'pickAuthor' } : { kind: 'manageAuthors', label: 'addAuthor' },
-      },
-    ];
-  }
-  const { bio, links } = authorProfile(author);
-  const missing = !bio && !links ? 'both' : !bio ? 'bio' : 'links';
-  return [
-    {
-      key: 'eeat:authorProfile',
-      score: 'eeat',
-      gain: scoreGain(eeat, ['authorBio']),
-      line: t(`checks.authorProfile.line.${missing}`, { name: author.name }),
-      detail: canEdit
-        ? t(`checks.authorProfile.detail.${missing}`)
-        : t(`checks.authorProfile.askOthers.${missing}`, {
-            name: author.name,
-            member: author.userId ? 'yes' : 'no',
-          }),
-      action: canEdit ? { kind: 'manageAuthors', label: 'editAuthor' } : { kind: 'none' },
-    },
-  ];
 }
 
 /**
@@ -297,7 +366,7 @@ function trustSuggestions(t: T, trust: TrustRead | null): Suggestion[] {
       gain: trustGain(trust, ['claimsSourced']),
       line: t('checks.claimsSourced.line', { count: trust.unsourced.length }),
       detail: t('checks.claimsSourced.detail'),
-      action: { kind: 'show', text: trust.unsourced[0] },
+      show: trust.unsourced[0],
     });
   }
   if (trust.stale.length) {
@@ -311,7 +380,7 @@ function trustSuggestions(t: T, trust: TrustRead | null): Suggestion[] {
         months: FRESH_MONTHS,
       }),
       detail: t('checks.freshSources.detail'),
-      action: { kind: 'show', text: trust.stale[0].text },
+      show: trust.stale[0].text,
     });
   }
   if (trust.broken.length) {
@@ -324,7 +393,7 @@ function trustSuggestions(t: T, trust: TrustRead | null): Suggestion[] {
         count: trust.broken.length,
         url: trust.broken[0].url,
       }),
-      action: { kind: 'show', text: trust.broken[0].text },
+      show: trust.broken[0].text,
     });
   }
   return out;
