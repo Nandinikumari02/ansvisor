@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 import { Loader2 } from 'lucide-react';
@@ -79,6 +79,14 @@ export default function ContentEditorPage() {
       clearTimeout(timer);
     };
   }, [draftId, writing, read]);
+  // The agent's run ended, or was stopped: read the draft now, not on the next look.
+  const rereadDraft = useCallback(() => {
+    getContentDraft(draftId).then(
+      (draft) => draft && setRead({ id: draftId, draft }),
+      // The next look tries again.
+      () => {},
+    );
+  }, [draftId]);
 
   return (
     <div className="-m-6 flex h-[calc(100vh-4rem)] flex-col md:h-screen">
@@ -88,10 +96,13 @@ export default function ContentEditorPage() {
         </div>
       ) : current.draft && writing ? (
         <AgentWriting
+          draftId={current.draft.id}
+          brandId={current.draft.brandId}
           title={current.draft.title}
           method={current.draft.method}
           since={current.draft.agentSince}
           rewrite={current.draft.agentRun === 'rewrite'}
+          onRunEnded={rereadDraft}
         />
       ) : current.draft ? (
         <DraftEditor
