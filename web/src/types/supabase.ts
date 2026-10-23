@@ -973,6 +973,7 @@ export type Database = {
       content_drafts: {
         Row: {
           action_id: string | null
+          agent_run: string | null
           agent_state: string | null
           agent_state_at: string | null
           archived_at: string | null
@@ -999,6 +1000,7 @@ export type Database = {
         }
         Insert: {
           action_id?: string | null
+          agent_run?: string | null
           agent_state?: string | null
           agent_state_at?: string | null
           archived_at?: string | null
@@ -1025,6 +1027,7 @@ export type Database = {
         }
         Update: {
           action_id?: string | null
+          agent_run?: string | null
           agent_state?: string | null
           agent_state_at?: string | null
           archived_at?: string | null
@@ -1125,6 +1128,7 @@ export type Database = {
           after_text: string
           agent: string
           batch_id: string
+          before_html: string | null
           before_text: string
           block_text: string
           created_at: string
@@ -1144,6 +1148,7 @@ export type Database = {
           after_text: string
           agent?: string
           batch_id: string
+          before_html?: string | null
           before_text?: string
           block_text: string
           created_at?: string
@@ -1163,6 +1168,7 @@ export type Database = {
           after_text?: string
           agent?: string
           batch_id?: string
+          before_html?: string | null
           before_text?: string
           block_text?: string
           created_at?: string

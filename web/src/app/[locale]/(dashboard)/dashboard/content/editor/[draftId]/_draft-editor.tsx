@@ -33,6 +33,7 @@ import {
   restoreDraftVersion,
   setContentDraftPageType,
   startAgentWriting,
+  startPageRewrite,
 } from '@/lib/actions/content-drafts';
 import { agentWriteRequest, useRuleDescriber } from '@/lib/content/agent-write';
 import {
@@ -82,7 +83,8 @@ import { HtmlBlock, copyToClipboard } from './_html-block';
 import { OwnCopies, ownCopyHtml } from './_own-copies';
 import { PageTypeMenu } from './_page-type-menu';
 import type { AgentRewrite } from './_brief-tab';
-import { ruleStatusDetail, type AgentFix } from './_rules-tab';
+import { ruleStatusDetail, type AgentFix, type PageRewrite } from './_rules-tab';
+import { PageRewriteBar, pageChangedSince } from './_page-rewrite';
 import { EditorPanelRail, EditorSidePanel, useSidePanelOpen, type PanelTab } from './_side-panel';
 import {
   AgentSuggestions,
@@ -170,8 +172,11 @@ export function DraftEditor({
   onAgentStarted,
 }: {
   draft: ContentDraft;
-  /** The Content Agent took the draft again (Try again): the page waits for it. */
-  onAgentStarted?: () => void;
+  /**
+   * The Content Agent took the draft again (Try again, Rewrite from brief, or
+   * Rewrite the page to these rules): the page waits for it.
+   */
+  onAgentStarted?: (run: 'write' | 'rewrite') => void;
 }) {
   const t = useTranslations('contentEditor.editor');
   const autosave = useDraftAutosave(draft.id, draft);
@@ -184,7 +189,10 @@ export function DraftEditor({
   const [marking, setMarking] = useState(false);
   // The Content Agent couldn't finish the page Start gave it (CE-015).
   const [agentFailed, setAgentFailed] = useState(draft.agentState === 'failed');
+  // That run was a rewrite (agent_run, on every device): Try again rewrites again.
+  const failedRewrite = draft.agentState === 'failed' && draft.agentRun === 'rewrite';
   const [starting, setStarting] = useState(false);
+  const [rewriting, setRewriting] = useState(false);
   const describeRule = useRuleDescriber();
   const [restoring, setRestoring] = useState(false);
   const format = useFormatter();
@@ -456,8 +464,10 @@ export function DraftEditor({
   useEffect(() => {
     suggestionsNow.current = suggestions;
     if (!editor || editor.isDestroyed) return;
+    // A whole page (Rewrite the page to these rules) has its own bar, not a card.
+    const cards = suggestions.filter((s) => s.kind !== 'page');
     editor.view.dispatch(
-      editor.state.tr.setMeta(suggestionsKey, { suggestions, labels: suggestionLabels }),
+      editor.state.tr.setMeta(suggestionsKey, { suggestions: cards, labels: suggestionLabels }),
     );
   }, [editor, suggestions, suggestionLabels]);
 
@@ -561,6 +571,63 @@ export function DraftEditor({
     }
   };
   const openSuggestions = suggestions.filter((s) => s.status === 'open').length;
+  const pageSuggestion = suggestions.find((s) => s.kind === 'page') ?? null;
+
+  /**
+   * A whole page rewritten (Rewrite the page to these rules): Accept puts it
+   * in place of the page the agent read (History keeps that first), Reject
+   * leaves the page, and Undo puts the page back. A page changed since
+   * isn't written over: the person runs the rewrite again.
+   */
+  const decidePage = async (s: DraftSuggestion, to: SuggestionStatus) => {
+    if (!editor || deciding) return;
+    const undo = to === 'open' && s.status === 'accepted';
+    // What the page must still read as for the change to go in.
+    const expected = to === 'accepted' ? (s.beforeHtml ?? '') : undo ? s.afterText : null;
+    const changed = () => expected !== null && pageChangedSince(editor.getHTML(), expected);
+    const refuse = () =>
+      toast(to === 'accepted' ? t('rewrite.changed') : t('rewrite.changedAfter'));
+    if (changed()) {
+      refuse();
+      return;
+    }
+    setDeciding(true);
+    // Held still from here: nothing typed while History and the decision are
+    // saved can be written over.
+    const editable = editor.isEditable;
+    editor.setEditable(false, false);
+    try {
+      if (to === 'accepted' && !agentBeforeKept.current) {
+        await autosave.settle();
+        await keepAgentBeforeVersion(draft.id);
+        agentBeforeKept.current = true;
+      }
+      if (changed()) {
+        refuse();
+        return;
+      }
+      await decideDraftSuggestions([s.id], to);
+      if (expected !== null) {
+        editor
+          .chain()
+          .setMeta(CITED_EDIT_ALLOWED, true)
+          // The page as it was, two H1s and all, on Undo.
+          .setMeta(ONE_H1_AS_IS, true)
+          .setContent(to === 'accepted' ? s.afterText : (s.beforeHtml ?? ''))
+          .run();
+      }
+      setSuggestions((prev) => prev.map((x) => (x.id === s.id ? { ...x, status: to } : x)));
+      if (to === 'accepted') toast.success(t('rewrite.acceptedToast'));
+      else if (to === 'rejected') toast(t('rewrite.rejectedToast'));
+      else toast(t('rewrite.undoneToast'));
+    } catch (err) {
+      console.error('Failed to decide the rewritten page:', err);
+      toast.error(t('suggestions.saveFailed'));
+    } finally {
+      if (editable) editor.setEditable(true, false);
+      setDeciding(false);
+    }
+  };
 
   // A full batch: the run stopped at its most, so it says to run it again.
   const fixedMessage = (count: number) =>
@@ -661,6 +728,8 @@ export function DraftEditor({
       setFixing(false);
     }
   };
+  // One agent run at a time from this page: the others wait for it.
+  const agentBusy = fixing || starting || rewriting;
   const agentFix: AgentFix = {
     run: (only) => void fixRules(only),
     running: fixing,
@@ -669,7 +738,9 @@ export function DraftEditor({
         ? t('suggestions.decideFirst')
         : !citedRead
           ? t('suggestions.citedLoading')
-          : null,
+          : agentBusy && !fixing
+            ? t('suggestions.agentBusy')
+            : null,
   };
 
   // A drag with files over the page shows where they go; one dropped beside
@@ -797,7 +868,7 @@ export function DraftEditor({
         toast.error(t(`agentFailed.errors.${result.error}`));
         return;
       }
-      onAgentStarted?.();
+      onAgentStarted?.('write');
     } catch (err) {
       console.error('Failed to start the Content Agent again:', err);
       toast.error(t('agentFailed.errors.failed'));
@@ -813,7 +884,82 @@ export function DraftEditor({
     ? {
         run: () => void startAgent(),
         running: starting,
-        blocked: openSuggestions > 0 ? t('suggestions.decideFirst') : null,
+        blocked:
+          openSuggestions > 0
+            ? t('suggestions.decideFirst')
+            : agentBusy && !starting
+              ? t('suggestions.agentBusy')
+              : null,
+      }
+    : undefined;
+
+  /**
+   * Rewrite the page to these rules: the page as saved now, the rules in
+   * effect here (with how the page reads against each), the person's own
+   * rules and the passages still locked go to the Content Agent, which
+   * rewrites the whole page in the background; the page waits for it, then
+   * opens with the rewrite to compare.
+   */
+  const rewritePage = async () => {
+    // Never before the locked passages are read: the rewrite would be told none are.
+    if (!editor || agentBusy || !citedRead) return;
+    setRewriting(true);
+    try {
+      await autosave.settle();
+      const inEffect = rules.rules.filter(({ rule }) => rule.on);
+      const locks = citedLocks(editor.state);
+      const request = await agentWriteRequest(
+        {
+          id: draft.id,
+          brandId: draft.brandId,
+          title,
+          pageType,
+          method: draft.method,
+          sourceUrl: draft.sourceUrl,
+          bodyHtml: editor.getHTML(),
+          rules: draft.rules,
+        },
+        describeRule,
+        {
+          rules: inEffect.map(({ rule }) => rule),
+          textRules: rules.textRules.filter(({ rule }) => rule.on).map(({ rule }) => rule.text),
+        },
+        // The passages still locked here, the ones the person didn't unlock.
+        [...locks.labels.keys()].filter((key) => !locks.unlocked.has(key)),
+      );
+      // Each rule says how the page reads now, as Apply rules with Agent's do.
+      const statusOf = new Map(inEffect.map(({ rule, status }) => [rule.key, status]));
+      request.rules = request.rules.map((rule) => {
+        const status = statusOf.get(rule.key);
+        if (!status || status.state !== 'bad') return rule;
+        const now = `${tRules('agent.now')}: ${ruleStatusDetail(tStatus, status)}`;
+        return { ...rule, detail: [rule.detail, now].filter(Boolean).join(' · ').slice(0, 500) };
+      });
+      const result = await startPageRewrite(draft.id, draft.brandId, request);
+      if ('error' in result) {
+        toast.error(t(`agentFailed.errors.${result.error}`));
+        return;
+      }
+      onAgentStarted?.('rewrite');
+    } catch (err) {
+      console.error('Failed to start the page rewrite:', err);
+      toast.error(t('agentFailed.errors.failed'));
+    } finally {
+      setRewriting(false);
+    }
+  };
+  const pageRewrite: PageRewrite | undefined = canMarkReady
+    ? {
+        run: () => void rewritePage(),
+        running: rewriting,
+        blocked:
+          openSuggestions > 0
+            ? t('suggestions.decideFirst')
+            : !citedRead
+              ? t('suggestions.citedLoading')
+              : agentBusy && !rewriting
+                ? t('suggestions.agentBusy')
+                : null,
       }
     : undefined;
   const markReady = async () => {
@@ -1012,16 +1158,18 @@ export function DraftEditor({
               className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-amber-200 bg-amber-50 px-4 py-1.5 text-[13px] text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
             >
               <Bot aria-hidden className="h-3.5 w-3.5 shrink-0" />
-              <span className="min-w-0 flex-1">{t('agentFailed.text')}</span>
+              <span className="min-w-0 flex-1">
+                {failedRewrite ? t('agentFailed.rewriteText') : t('agentFailed.text')}
+              </span>
               <span className="flex shrink-0 items-center gap-1">
                 <Button
                   variant="outline"
                   size="sm"
                   className="h-7"
-                  disabled={starting || !editor}
-                  onClick={() => void startAgent()}
+                  disabled={agentBusy || !editor || (failedRewrite && !citedRead)}
+                  onClick={() => void (failedRewrite ? rewritePage() : startAgent())}
                 >
-                  {starting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {(starting || rewriting) && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                   {t('agentFailed.retry')}
                 </Button>
                 <Button
@@ -1056,7 +1204,17 @@ export function DraftEditor({
               </span>
             </p>
           )}
-          {suggestions.length > 0 && !(barClosed && openSuggestions === 0) && (
+          {pageSuggestion && !(barClosed && openSuggestions === 0) && (
+            <PageRewriteBar
+              suggestion={pageSuggestion}
+              rulesOpen={Math.max(0, rules.total - rules.met)}
+              // Not while the HTML view holds the page: it would write over it.
+              busy={deciding || htmlSource !== null}
+              onDecide={(to) => void decidePage(pageSuggestion, to)}
+              onClose={() => setBarClosed(true)}
+            />
+          )}
+          {!pageSuggestion && suggestions.length > 0 && !(barClosed && openSuggestions === 0) && (
             <AgentBar
               suggestions={suggestions}
               rulesOpen={Math.max(0, rules.total - rules.met)}
@@ -1144,6 +1302,7 @@ export function DraftEditor({
             reads={reads}
             tabRequest={tabRequest}
             agentFix={agentFix}
+            pageRewrite={pageRewrite}
             agentRewrite={agentRewrite}
           />
         ) : (
