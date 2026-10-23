@@ -65,6 +65,7 @@ export function BeforePublish({
   mode = 'markReady',
   paste,
   onFillNow,
+  contentByline = null,
   onContinue,
   onClose,
   quality,
@@ -81,6 +82,8 @@ export function BeforePublish({
   paste: ReadyToPaste;
   /** Goes to the first placeholder, to fill it (Ready to paste's Fill now). */
   onFillNow: () => void;
+  /** The byline line the brand puts in the content (Add byline to content), or null. */
+  contentByline?: string | null;
   /** Export's: goes on to it. */
   onContinue?: () => void;
   onClose: () => void;
@@ -139,8 +142,10 @@ export function BeforePublish({
       : author
         ? {
             state: 'check',
-            title: t('author.ok'),
-            detail: t('author.okDetail', { name: author.name }),
+            title: contentByline ? t('author.inContentTitle') : t('author.ok'),
+            detail: contentByline
+              ? t('author.inContent', { line: contentByline })
+              : t('author.okDetail', { name: author.name }),
           }
         : {
             state: 'missing',

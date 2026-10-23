@@ -98,6 +98,7 @@ async function render(
     linksPending = 0,
     paste = clean,
     mode = 'markReady' as 'markReady' | 'export',
+    contentByline = null as string | null,
     title = 'How small teams forecast',
   } = {},
 ) {
@@ -108,6 +109,7 @@ async function render(
           mode={mode}
           paste={paste}
           onFillNow={onFillNow}
+          contentByline={contentByline}
           onContinue={onContinue}
           onClose={() => {}}
           quality={q}
@@ -366,6 +368,16 @@ describe('BeforePublish', () => {
     await act(async () => button('Fix first')!.click());
     expect(onFixFirst).toHaveBeenCalledWith(expect.any(String));
     expect(onContinue).not.toHaveBeenCalled();
+  });
+
+  it('says the exports put the byline under the H1 for a brand that adds it to content', async () => {
+    await render(quality(), { contentByline: 'By Ada Lovelace' });
+    expect(rows()[0]).toBe(
+      'Byline in the content · check itExports put "By Ada Lovelace" under the H1: this brand adds the byline to content, for a CMS with no author field.',
+    );
+    // The line as it goes out, in the brand's language.
+    await render(quality(), { contentByline: 'Yazar: Ada Lovelace' });
+    expect(rows()[0]).toContain('Exports put "Yazar: Ada Lovelace" under the H1');
   });
 
   it("gives no Article for a page that isn't one", async () => {

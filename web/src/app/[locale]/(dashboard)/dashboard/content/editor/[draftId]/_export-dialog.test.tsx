@@ -65,6 +65,7 @@ async function render(over: Partial<Parameters<typeof ExportDialog>[0]> = {}) {
           sourceUrl={null}
           author={ada}
           teamByline="Acme Team"
+          byline={null}
           checks={checks}
           linksPending={0}
           onFillNow={onFillNow}
@@ -287,6 +288,31 @@ describe('ExportDialog', () => {
     expect(format).toBe('md');
     expect(fields.front).not.toHaveProperty('date');
     expect(fields.front).toHaveProperty('lastmod', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
+  });
+
+  it("puts the brand's byline line under the H1, not in the page fields", async () => {
+    vi.stubGlobal('ClipboardItem', undefined);
+    document.execCommand = vi.fn(() => false);
+    await render({ html: '<h1>Pour-over</h1><p>Done.</p>', byline: 'By Ada Lovelace' });
+    await act(async () => button('Copy for Webflow')!.click());
+    expect(writeText).toHaveBeenCalledWith('<p>By Ada Lovelace</p><p>Done.</p>');
+    expect(dialog().textContent).toContain('Meta descriptionDone.');
+    expect(dialog().textContent).toContain(
+      'AuthorAda Lovelace → in the content, under the H1 (Add byline to content)',
+    );
+    await act(async () => destination('Word').click());
+    await act(async () => button('Download Word')!.click());
+    expect(draftExportBlob).toHaveBeenCalledWith(
+      'docx',
+      'Pour-over',
+      '<h1>Pour-over</h1><p>By Ada Lovelace</p><p>Done.</p>',
+      expect.anything(),
+    );
+    await act(async () => destination('HTML').click());
+    await act(async () => button('Copy HTML')!.click());
+    expect(writeText).toHaveBeenLastCalledWith(
+      '<h1>Pour-over</h1><p>By Ada Lovelace</p><p>Done.</p>',
+    );
   });
 
   it("opens on HTML for Copy HTML, and copies the page's HTML as it is", async () => {

@@ -4,11 +4,13 @@ import type { LinkCheck } from './quality-checks';
 import { PLACEHOLDER } from './placeholders';
 import {
   blankCode,
+  bylineText,
   exportPlaceholders,
   fragment,
   pageFields,
   pasteChecks,
   titlePlaceholders,
+  withByline,
   withoutLeadingH1,
   withoutPlaceholders,
 } from './ready-to-publish';
@@ -273,6 +275,72 @@ describe('pageFields', () => {
     });
     expect(metaDescription.length).toBeLessThanOrEqual(160);
     expect(metaDescription.endsWith('slowly…')).toBe(true);
+  });
+});
+
+describe('withByline', () => {
+  it('puts one byline line under the H1, or at the top of a page with none, as text', () => {
+    expect(withByline('<h1>Pour-over</h1><p>Brew.</p>', 'By Ada Lovelace')).toBe(
+      '<h1>Pour-over</h1><p>By Ada Lovelace</p><p>Brew.</p>',
+    );
+    expect(withByline('<p>Brew.</p><h1>Late</h1>', 'By <Acme> Team')).toBe(
+      '<p>By &lt;Acme&gt; Team</p><p>Brew.</p><h1>Late</h1>',
+    );
+    expect(withByline('<h1>Pour-over</h1>\n<p>Brew.</p>', 'By Ada')).toBe(
+      '<h1>Pour-over</h1>\n<p>By Ada</p>\n<p>Brew.</p>',
+    );
+  });
+
+  it('keeps the rest as written, under an H1 an image comes before, and adds none twice or alone', () => {
+    // An HTML block's code is not rewritten (a template would close <path/>).
+    expect(withByline('<h1>Pour-over</h1><svg><path d="M0"/></svg>', 'By Ada')).toBe(
+      '<h1>Pour-over</h1><p>By Ada</p><svg><path d="M0"/></svg>',
+    );
+    expect(
+      withByline('<img src="https://cdn.acme.com/a.jpg"><h1>Pour-over</h1><p>Brew.</p>', 'By Ada'),
+    ).toBe('<img src="https://cdn.acme.com/a.jpg"><h1>Pour-over</h1><p>By Ada</p><p>Brew.</p>');
+    expect(withByline('<h1>Pour-over</h1>\n<p>By  Ada</p>\n<p>Brew.</p>', 'By Ada')).toBe(
+      '<h1>Pour-over</h1>\n<p>By  Ada</p>\n<p>Brew.</p>',
+    );
+    expect(withByline('', 'By Ada')).toBe('');
+    expect(withByline('<p></p>', 'By Ada')).toBe('<p></p>');
+  });
+
+  it("puts it under the lead's own H1: not an empty one above, nor one in a comment", () => {
+    expect(withByline('<h1></h1>\n<h1>Pour-over</h1>\n<p>Brew.</p>', 'By Ada')).toBe(
+      '<h1></h1>\n<h1>Pour-over</h1>\n<p>By Ada</p>\n<p>Brew.</p>',
+    );
+    expect(withByline('<!-- <h1>Old</h1> -->\n<h1>Pour-over</h1>\n<p>Brew.</p>', 'By Ada')).toBe(
+      '<!-- <h1>Old</h1> -->\n<h1>Pour-over</h1>\n<p>By Ada</p>\n<p>Brew.</p>',
+    );
+    expect(
+      withByline(
+        '<script>document.write("<h1>x</h1>")</script>\n<H1 class="t">Pour-over</H1>\n<p>Brew.</p>',
+        'By Ada',
+      ),
+    ).toBe(
+      '<script>document.write("<h1>x</h1>")</script>\n<H1 class="t">Pour-over</H1>\n<p>By Ada</p>\n<p>Brew.</p>',
+    );
+  });
+});
+
+describe('bylineText', () => {
+  it("writes the line in the brand's language, by the author or the brand's team", () => {
+    expect(bylineText(null, 'Ada Lovelace', 'Acme')).toBe('By Ada Lovelace');
+    expect(bylineText('en-US', null, 'Acme')).toBe('By Acme Team');
+    expect(bylineText('tr', 'Ayşe Yılmaz', 'Acme')).toBe('Yazar: Ayşe Yılmaz');
+    expect(bylineText('tr', null, 'Acme')).toBe('Yazar: Acme Ekibi');
+    expect(bylineText('pt-BR', 'Ana Silva', 'Acme')).toBe('Por Ana Silva');
+    expect(bylineText('pt', null, 'Acme')).toBe('Pela equipe Acme');
+    expect(bylineText('de', null, 'Acme')).toBe('Vom Acme-Team');
+    expect(bylineText('fr', null, 'Acme')).toBe("Par l'équipe Acme");
+    // A "$" in a name is written as it is.
+    expect(bylineText('es', 'Ana $& Co', 'Acme')).toBe('Por Ana $& Co');
+  });
+
+  it('puts the name alone, or the brand alone, for a language not in the table', () => {
+    expect(bylineText('ja', '山田太郎', 'Acme')).toBe('山田太郎');
+    expect(bylineText('ar', null, 'Acme')).toBe('Acme');
   });
 });
 
