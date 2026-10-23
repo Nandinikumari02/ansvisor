@@ -4106,6 +4106,8 @@
       "quality": {
         "scores": "Quality scores",
         "names": {
+          "eeat": "E-E-A-T",
+          "trust": "Trust",
           "readability": "Readability"
         },
         "bands": {
@@ -4115,9 +4117,14 @@
         },
         "estimate": "Ansvisor estimates based on Google's published quality signals. Not a Google score.",
         "tooShort": "Write a few paragraphs: Readability is read from the page as you write.",
+        "tooShortShort": "Too short yet",
+        "notScored": "Not scored yet",
+        "pickAuthor": "Pick author",
+        "addAuthor": "Add author",
+        "editAuthor": "Edit author",
         "notThisLanguage": "Readability isn't read for this language yet.",
         "suggestionsLabel": "What would raise it",
-        "nothingToRaise": "Nothing to raise here: the page reads well.",
+        "nothingToRaise": "Nothing to raise here for now: every live check has its points.",
         "gain": "+{gain, number} {score}",
         "band": "{score, number}, {band}",
         "show": "Show",
@@ -4129,6 +4136,27 @@
           "fernandezHuerta": "Fernández-Huerta"
         },
         "checks": {
+          "byline": {
+            "line": "The page is by {byline}, not a person",
+            "detail": "Pick the person who wrote it: a named author with a short bio and profile links shows who stands behind the page."
+          },
+          "authorProfile": {
+            "line": {
+              "both": "{name} has no short bio or profile links",
+              "bio": "{name} has no short bio",
+              "links": "{name} has no profile links"
+            },
+            "detail": {
+              "both": "Add them in Settings › Authors: two sentences on what they know, and a LinkedIn or other profile link.",
+              "bio": "Add a short bio in Settings › Authors: two sentences on what they know.",
+              "links": "Add a LinkedIn or other profile link in Settings › Authors."
+            },
+            "askOthers": {
+              "both": "{member, select, yes {{name}, whoever added them or an admin can add a short bio and a profile link in Settings › Authors.} other {Whoever added {name} or an admin can add a short bio and a profile link in Settings › Authors.}}",
+              "bio": "{member, select, yes {{name}, whoever added them or an admin can add a short bio in Settings › Authors.} other {Whoever added {name} or an admin can add a short bio in Settings › Authors.}}",
+              "links": "{member, select, yes {{name}, whoever added them or an admin can add a profile link in Settings › Authors.} other {Whoever added {name} or an admin can add a profile link in Settings › Authors.}}"
+            }
+          },
           "avgSentence": {
             "line": "Sentences average {words, number} words",
             "detail": "Aim for 15–20 words: shorter sentences read faster, and AI answers quote them whole.",

@@ -40,7 +40,7 @@ import {
 import { getContentAuthors } from '@/lib/actions/content-authors';
 import { stopAgentRun } from '@/lib/content/agent-runs-client';
 import { agentWriteRequest, useRuleDescriber } from '@/lib/content/agent-write';
-import { authorInitials, type AuthorsRead } from '@/lib/content/authors';
+import { authorInitials, canEditAuthor, type AuthorsRead } from '@/lib/content/authors';
 import {
   AGENT_POLL_MS,
   CONTENT_LIBRARY_PATH,
@@ -74,6 +74,7 @@ import { PAGE_READ_DELAY_MS, draftTitleFromDoc, safeLinkHref } from '@/lib/conte
 import { JsonLd } from '@/lib/content/json-ld-node';
 import { detectPageType } from '@/lib/content/page-types';
 import { BAND_CLASSES, qualityAverage, qualityBand, qualityPhase } from '@/lib/content/quality';
+import { eeat } from '@/lib/content/quality-checks';
 import { readability } from '@/lib/content/readability';
 import { aiTracesFound, fanoutsToUse, lengthWarns, openRulesForAgent } from '@/lib/content/rules';
 import { saveBlob } from '@/lib/download';
@@ -100,6 +101,7 @@ import { HistoryMenu } from './_history-menu';
 import { HtmlBlock, copyToClipboard } from './_html-block';
 import { OwnCopies, ownCopyHtml } from './_own-copies';
 import { PageInfoStrip, pageInfoKey } from './_page-info';
+import type { QualityRead } from './_quality-tab';
 import { PageTypeMenu } from './_page-type-menu';
 import type { AgentRewrite } from './_brief-tab';
 import { ruleStatusDetail, type AgentFix, type PageRewrite } from './_rules-tab';
@@ -416,7 +418,6 @@ export function DraftEditor({
     () => (qualityOn ? readability(pageHtml, language) : null),
     [qualityOn, pageHtml, language],
   );
-  const qualityScore = qualityAverage([readable?.score ?? null]);
 
   // Who the page is by (CE-038): page metadata, shown in the header and in a
   // Page info strip outside the page; with Quality's first phase.
@@ -441,6 +442,26 @@ export function DraftEditor({
   const brandName =
     authorsRead?.brands.find((b) => b.id === draft.brandId)?.name ?? storeBrandName ?? '';
   const pageAuthor = authorsRead?.authors.find((a) => a.id === authorId) ?? null;
+  // E-E-A-T from the author (CE-039): with Readability, the scores and the
+  // header chip's average. Trust waits for a check that can read the page.
+  const eeatScore = useMemo(
+    () => (qualityOn && authorsRead ? eeat({ author: pageAuthor }) : null),
+    [qualityOn, authorsRead, pageAuthor],
+  );
+  const qualityScore = qualityAverage([eeatScore?.score ?? null, readable?.score ?? null]);
+  const quality: QualityRead | null = qualityOn
+    ? {
+        readability: readable,
+        eeat: eeatScore,
+        trust: null,
+        author: pageAuthor,
+        canEdit: !!pageAuthor && !!authorsRead && canEditAuthor(pageAuthor, authorsRead.me),
+        hasAuthors: (authorsRead?.authors.length ?? 0) > 0,
+        brandName,
+      }
+    : null;
+  // Quality's Pick author opens the header's menu.
+  const [authorMenuOpen, setAuthorMenuOpen] = useState(false);
   const byline = authorsRead
     ? [
         t('author.by', {
@@ -1452,6 +1473,8 @@ export function DraftEditor({
               authors={authorsRead.authors}
               authorId={authorId}
               onPick={(next) => void pickAuthor(next)}
+              open={authorMenuOpen}
+              onOpenChange={setAuthorMenuOpen}
             />
           )}
           <DraftMethodBadge method={draft.method} />
@@ -1663,8 +1686,10 @@ export function DraftEditor({
             }
             onBriefRebuilding={onBriefRebuilding}
             briefBlocked={agentBusy && !briefRebuilding ? t('suggestions.agentBusy') : null}
-            readability={readable}
+            quality={quality}
+            qualityScore={qualityScore}
             onShowInPage={showInPage}
+            onPickAuthor={() => setAuthorMenuOpen(true)}
           />
         ) : (
           <EditorPanelRail onOpen={openPanelTab} />
