@@ -1140,6 +1140,8 @@ export type Database = {
           position: number
           reason: string
           rule_keys: string[]
+          source_marks: Json | null
+          sources: Json | null
           status: string
         }
         Insert: {
@@ -1160,6 +1162,8 @@ export type Database = {
           position?: number
           reason: string
           rule_keys?: string[]
+          source_marks?: Json | null
+          sources?: Json | null
           status?: string
         }
         Update: {
@@ -1180,6 +1184,8 @@ export type Database = {
           position?: number
           reason?: string
           rule_keys?: string[]
+          source_marks?: Json | null
+          sources?: Json | null
           status?: string
         }
         Relationships: [

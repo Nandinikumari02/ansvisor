@@ -589,6 +589,8 @@ describe('agent suggestions', () => {
       status: 'open',
       // When the run left it, for "Last used by Content Agent".
       createdAt: '2026-10-21T10:00:00Z',
+      sources: null,
+      sourceMarks: null,
     });
     expect(calls[0].filters).toContainEqual(['eq', 'draft_id', DRAFT]);
     // The latest batch is found first; only its rows are read whole.
@@ -599,6 +601,31 @@ describe('agent suggestions', () => {
     list = [];
     await expect(getDraftSuggestions(DRAFT)).resolves.toEqual([]);
     expect(calls).toHaveLength(1);
+  });
+
+  it('reads what a suggestion was written from, and only marks it can show (00248)', async () => {
+    list = [
+      row({
+        after_text: 'shown per team in 2026',
+        sources: [
+          { kind: 'fanout', ref: 'forecast per team', label: 'Forecast per team' },
+          { kind: 'made-up', ref: 'x', label: 'x' },
+          { kind: 'gsc_query', ref: '', label: 'empty' },
+        ],
+        source_marks: [
+          { start: 0, end: 5, source: 0 },
+          { start: 3, end: 8, source: 0 },
+          { start: 18, end: 22, source: 4 },
+          { start: 18, end: 99, source: 0 },
+        ],
+      }),
+    ];
+    const [read] = await getDraftSuggestions(DRAFT);
+    expect(read.sources).toEqual([
+      { kind: 'fanout', ref: 'forecast per team', label: 'Forecast per team' },
+    ]);
+    // Overlapping, out of range or to a source it doesn't have: left out.
+    expect(read.sourceMarks).toEqual([{ start: 0, end: 5, source: 0 }]);
   });
 
   it('reads a whole page rewritten, with the page the agent read (00247)', async () => {
