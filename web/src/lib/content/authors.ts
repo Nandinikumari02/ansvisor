@@ -19,6 +19,8 @@ export interface ContentAuthor {
   createdBy: string | null;
   /** The brands whose pages it is by when nobody picks another. */
   defaultFor: string[];
+  /** The Library pages it is the author of (content_drafts.author_id, CE-038), when counted. */
+  pages: number | null;
 }
 
 export interface AuthorsRead {
@@ -26,6 +28,16 @@ export interface AuthorsRead {
   brands: { id: string; name: string }[];
   /** The member reading: what they may change. */
   me: { id: string; role: string };
+}
+
+/** "Ada Lovelace" → "AL": an author's face without a photo. */
+export function authorInitials(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join('');
 }
 
 /** The most profile links an author keeps (00256). */

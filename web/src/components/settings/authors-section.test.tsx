@@ -46,6 +46,7 @@ function workspace(role: string): AuthorsRead {
         userId: ME,
         createdBy: OTHER,
         defaultFor: [ACME],
+        pages: 3,
       },
       {
         id: BOB,
@@ -57,6 +58,7 @@ function workspace(role: string): AuthorsRead {
         userId: OTHER,
         createdBy: OTHER,
         defaultFor: [],
+        pages: 0,
       },
       {
         id: CAL,
@@ -68,6 +70,7 @@ function workspace(role: string): AuthorsRead {
         userId: null,
         createdBy: ME,
         defaultFor: [],
+        pages: 0,
       },
     ],
     brands: [{ id: ACME, name: 'Acme' }],
@@ -134,9 +137,12 @@ describe('AuthorsSection', () => {
       "Real people only. Content Agent can't add, edit or invent authors.",
     );
     expect(row('Ada Lovelace').textContent).toContain('(you)');
-    expect(row('Ada Lovelace').textContent).toContain('1 profile link · Default for Acme');
-    expect(row('Bob Stone').textContent).toContain('No profile links');
+    expect(row('Ada Lovelace').textContent).toContain(
+      '1 profile link · 3 pages · Default for Acme',
+    );
+    expect(row('Bob Stone').textContent).toContain('No profile links · no pages yet');
     expect(trigger().querySelector('[data-slot="select-value"]')!.textContent).toBe('Ada Lovelace');
+    expect(actions.getContentAuthors).toHaveBeenCalledWith({ pages: true });
   });
 
   it('lets a member edit the author they are and the ones they added, not the defaults', async () => {
@@ -257,10 +263,22 @@ describe('AuthorsSection', () => {
     await render();
     await click(row('Cal Freelance').querySelectorAll('button')[1]);
     expect(document.body.textContent).toContain('Remove Cal Freelance?');
+    expect(document.body.textContent).toContain(
+      "They leave the authors list and any brand's default. No page in the Library is by them.",
+    );
     expect(actions.deleteContentAuthor).not.toHaveBeenCalled();
 
     await click(buttons('Remove').find((b) => !container.contains(b)));
     expect(actions.deleteContentAuthor).toHaveBeenCalledWith(CAL);
+  });
+
+  it("says the author's pages go back to the team byline", async () => {
+    await render();
+    await click(row('Ada Lovelace').querySelectorAll('button')[1]);
+    expect(document.body.textContent).toContain('Remove Ada Lovelace?');
+    expect(document.body.textContent).toContain(
+      "Their 3 pages go back to your brand's team byline.",
+    );
   });
 
   it("says so when the authors can't be read", async () => {

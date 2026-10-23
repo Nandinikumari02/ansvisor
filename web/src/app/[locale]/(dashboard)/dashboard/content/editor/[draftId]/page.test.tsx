@@ -15,6 +15,11 @@ const getContentDraft = vi.fn();
 const markContentDraftReady = vi.fn();
 const saveContentDraft = vi.fn();
 const setContentDraftPageType = vi.fn();
+const setContentDraftAuthor = vi.fn();
+const getContentAuthors = vi.fn();
+vi.mock('@/lib/actions/content-authors', () => ({
+  getContentAuthors: (...args: unknown[]) => getContentAuthors(...args),
+}));
 const getContentImpact = vi.fn();
 const getContentResults = vi.fn();
 const getDraftSources = vi.fn();
@@ -62,6 +67,7 @@ vi.mock('@/lib/actions/content-drafts', () => ({
   markContentDraftReady: (...args: unknown[]) => markContentDraftReady(...args),
   saveContentDraft: (...args: unknown[]) => saveContentDraft(...args),
   setContentDraftPageType: (...args: unknown[]) => setContentDraftPageType(...args),
+  setContentDraftAuthor: (...args: unknown[]) => setContentDraftAuthor(...args),
 }));
 vi.mock('next/navigation', () => ({ useParams: () => ({ draftId: 'd1' }) }));
 vi.mock('@/i18n/navigation', () => ({
@@ -153,6 +159,7 @@ const draft = (over: Partial<ContentDraft> = {}): ContentDraft => ({
   status: 'in_review',
   bodyHtml: '<h1>Pipeline forecasting</h1><p>Teams trust it.</p>',
   author: 'agent',
+  authorId: null,
   rules: { set: null, source: null, overrides: {}, textRules: [] },
   action: null,
   agentState: null,
@@ -222,6 +229,8 @@ beforeEach(() => {
   markContentDraftReady.mockReset();
   saveBlob.mockReset();
   setContentDraftPageType.mockReset().mockResolvedValue(undefined);
+  setContentDraftAuthor.mockReset().mockResolvedValue(undefined);
+  getContentAuthors.mockReset().mockResolvedValue(null);
   saveContentDraft
     .mockReset()
     .mockResolvedValue({ ok: true, updatedAt: '2026-10-20T10:00:00Z', bodyHash: 'h0' });
@@ -2287,6 +2296,90 @@ describe('the side panel', () => {
         Element.prototype.scrollIntoView = original;
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe('Author (CE-038)', () => {
+    const ada = {
+      id: 'a1',
+      name: 'Ada Lovelace',
+      title: 'Head of Content',
+      bio: null,
+      photoUrl: null,
+      sameAs: [],
+      userId: null,
+      createdBy: null,
+      defaultFor: ['b1'],
+      pages: 1,
+    };
+    beforeEach(() => {
+      getContentAuthors.mockResolvedValue({
+        authors: [ada],
+        brands: [{ id: 'b1', name: 'Acme' }],
+        me: { id: 'u1', role: 'analyst' },
+      });
+    });
+    afterEach(() => {
+      delete process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE;
+    });
+    const byButton = () =>
+      [...container.querySelectorAll<HTMLButtonElement>('header button')].find((b) =>
+        b.textContent?.startsWith('By '),
+      );
+    const strip = () => container.querySelector<HTMLElement>('[data-page-info]');
+
+    it("shows no author until Quality's first phase is live", async () => {
+      getContentDraft.mockResolvedValue(draft({ authorId: 'a1' }));
+      await renderPage();
+      expect(getContentAuthors).not.toHaveBeenCalled();
+      expect(byButton()).toBeUndefined();
+      expect(strip()).toBeNull();
+    });
+
+    it('names the author in the header and a Page info strip outside the page', async () => {
+      process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '1';
+      getContentDraft.mockResolvedValue(draft({ authorId: 'a1' }));
+      await renderPage();
+      expect(byButton()!.textContent).toBe('By Ada Lovelace');
+      expect(strip()!.textContent).toBe(
+        'ALBy Ada Lovelace · Head of Content, Acme · Updated Oct 20, 2026Page info · shown by your CMS, not part of the content',
+      );
+      expect(strip()!.previousElementSibling?.tagName).toBe('H1');
+
+      // Copy HTML (as export, save and the HTML view) reads the page: no strip.
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      const copyPage = [...container.querySelectorAll<HTMLButtonElement>('header button')].find(
+        (b) => b.textContent === 'Copy HTML',
+      )!;
+      await act(async () => copyPage.click());
+      expect(writeText).toHaveBeenLastCalledWith(
+        '<h1>Pipeline forecasting</h1>\n<p>Teams trust it.</p>',
+      );
+    });
+
+    it('sets the organization byline, and goes back when that fails', async () => {
+      process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '1';
+      getContentDraft.mockResolvedValue(draft({ authorId: 'a1' }));
+      await renderPage();
+      await act(async () => byButton()!.click());
+      const team = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find(
+        (item) => item.textContent?.startsWith('Acme Team'),
+      )!;
+      await act(async () => team.click());
+      expect(setContentDraftAuthor).toHaveBeenCalledWith('d1', null);
+      // Page metadata: the page itself isn't saved for it.
+      expect(saveContentDraft).not.toHaveBeenCalled();
+      expect(byButton()!.textContent).toBe('By Acme Team');
+      expect(strip()!.textContent).toContain('By Acme Team · Updated');
+
+      setContentDraftAuthor.mockRejectedValue(new Error('invalid'));
+      await act(async () => byButton()!.click());
+      const back = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find(
+        (item) => item.textContent?.startsWith('Ada Lovelace'),
+      )!;
+      await act(async () => back.click());
+      expect(byButton()!.textContent).toBe('By Acme Team');
     });
   });
 

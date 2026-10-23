@@ -19,8 +19,10 @@ interface Call {
 }
 let calls: Call[] = [];
 /** What a write or read of each table answers. */
-let answers: Record<string, { data: unknown; error: null | { message: string; code?: string } }> =
-  {};
+let answers: Record<
+  string,
+  { data: unknown; count?: number; error: null | { message: string; code?: string } }
+> = {};
 
 function builder(table: string) {
   const call: Call = { table, op: 'select', filters: [] };
@@ -34,6 +36,10 @@ function builder(table: string) {
     delete: () => Object.assign(call, { op: 'delete' }) && chain,
     eq: (column: string, value: unknown) => {
       call.filters.push([column, value]);
+      return chain;
+    },
+    is: (column: string, value: unknown) => {
+      call.filters.push([`is ${column}`, value]);
       return chain;
     },
     order: () => chain,
@@ -84,11 +90,12 @@ describe('getContentAuthors', () => {
       error: null,
     };
     answers['brands.select'] = { data: [{ id: ACME, name: 'Acme' }], error: null };
+    answers['content_drafts.select'] = { data: null, count: 2, error: null };
     answers['content_author_defaults.select'] = {
       data: [{ brand_id: ACME, author_id: ADA }],
       error: null,
     };
-    const read = await getContentAuthors();
+    const read = await getContentAuthors({ pages: true });
     expect(read).toEqual({
       authors: [
         {
@@ -101,11 +108,28 @@ describe('getContentAuthors', () => {
           userId: ME,
           createdBy: OTHER,
           defaultFor: [ACME],
+          pages: 2,
         },
       ],
       brands: [{ id: ACME, name: 'Acme' }],
       me: { id: ME, role: 'analyst' },
     });
+  });
+
+  it("counts each author's Library pages only when asked", async () => {
+    answers['content_authors.select'] = {
+      data: [{ id: ADA, name: 'Ada', same_as: [], user_id: null, created_by: null }],
+      error: null,
+    };
+    expect((await getContentAuthors())!.authors[0].pages).toBeNull();
+    expect(calls.some((c) => c.table === 'content_drafts')).toBe(false);
+
+    answers['content_drafts.select'] = { data: null, count: 4, error: null };
+    expect((await getContentAuthors({ pages: true }))!.authors[0].pages).toBe(4);
+    expect(calls.find((c) => c.table === 'content_drafts')!.filters).toEqual([
+      ['author_id', ADA],
+      ['is archived_at', null],
+    ]);
   });
 
   it('reads nothing for a member without an organization', async () => {

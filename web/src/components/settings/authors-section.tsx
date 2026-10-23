@@ -33,6 +33,7 @@ import {
   setDefaultAuthor,
 } from '@/lib/actions/content-authors';
 import {
+  authorInitials,
   MAX_LINK_LENGTH,
   MAX_PROFILES,
   type AuthorInput,
@@ -67,7 +68,7 @@ export function AuthorsSection() {
 
   const load = useCallback(async () => {
     try {
-      const next = await getContentAuthors();
+      const next = await getContentAuthors({ pages: true });
       setRead(next);
       setFailed(!next);
     } catch {
@@ -167,6 +168,12 @@ export function AuthorsSection() {
                       )}
                       <p className="mt-0.5 text-xs text-muted-foreground [overflow-wrap:anywhere]">
                         {t('profiles', { count: author.sameAs.length })}
+                        {author.pages !== null && (
+                          <>
+                            {' · '}
+                            {t('pages', { count: author.pages })}
+                          </>
+                        )}
                         {author.defaultFor.length > 0 && (
                           <>
                             {' · '}
@@ -270,7 +277,11 @@ export function AuthorsSection() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t('removeTitle', { name: removing?.name ?? '' })}</DialogTitle>
-            <DialogDescription>{t('removeDescription')}</DialogDescription>
+            <DialogDescription>
+              {removing?.pages == null
+                ? t('removeDescriptionUncounted')
+                : t('removeDescription', { count: removing.pages })}
+            </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <DialogClose render={<Button variant="outline" disabled={busy} />}>
@@ -309,11 +320,7 @@ export function AuthorsSection() {
 
 /** The author's photo, or their initials. */
 function AuthorPhoto({ author }: { author: ContentAuthor }) {
-  const initials = author.name
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase() ?? '')
-    .join('');
+  const initials = authorInitials(author.name);
   return author.photoUrl ? (
     // eslint-disable-next-line @next/next/no-img-element -- any https host the person names
     <img
