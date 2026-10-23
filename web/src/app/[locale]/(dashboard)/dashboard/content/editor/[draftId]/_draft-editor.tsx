@@ -76,7 +76,12 @@ import { PAGE_READ_DELAY_MS, draftTitleFromDoc, safeLinkHref } from '@/lib/conte
 import { JsonLd } from '@/lib/content/json-ld-node';
 import { firstImage } from '@/lib/content/page-schema';
 import { PLACEHOLDER, pagePlaceholders, placeholderIn } from '@/lib/content/placeholders';
-import { exportPlaceholders, pasteChecks } from '@/lib/content/ready-to-publish';
+import {
+  blankCode,
+  exportPlaceholders,
+  pasteChecks,
+  titlePlaceholders,
+} from '@/lib/content/ready-to-publish';
 import { detectPageType } from '@/lib/content/page-types';
 import { BAND_CLASSES, qualityAverage, qualityBand, qualityPhase } from '@/lib/content/quality';
 import { eeat, linksToCheck, trust, trustBlocks } from '@/lib/content/quality-checks';
@@ -89,7 +94,7 @@ import { useBrandStore } from '@/stores/use-brand-store';
 import { AgentCard } from './_agent-card';
 import { AgentDrafting, draftingKey } from './_agent-drafting';
 import { AuthorMenu } from './_author-menu';
-import { BeforePublish, type ReadyAnyway } from './_before-publish';
+import { BeforePublish, type ReadyAnyway, type ReadyToPaste } from './_before-publish';
 import { FlashBlock, findBlock, flashKey } from './_flash-block';
 import { useAgentRun } from './_use-agent-run';
 import { useLinkChecks } from './_use-link-checks';
@@ -984,13 +989,14 @@ export function DraftEditor({
 
   /**
    * Fill now (Export, CE-057): the first placeholder, in the HTML view's
-   * text while it is open, else in the page; one only an HTML block holds is
+   * text while it is open (where exportPlaceholders reads: not in tags,
+   * styles or scripts), else in the page; one only an HTML block holds is
    * said to be there.
    */
   const htmlSourceRef = useRef<HTMLTextAreaElement>(null);
   const fillFirstPlaceholder = () => {
     if (htmlSource !== null) {
-      const m = new RegExp(PLACEHOLDER.source, 'iu').exec(htmlSource);
+      const m = new RegExp(PLACEHOLDER.source, 'iu').exec(blankCode(htmlSource, { words: true }));
       const area = htmlSourceRef.current;
       if (m && area) {
         area.focus();
@@ -1503,12 +1509,29 @@ export function DraftEditor({
       }
     : undefined;
   // Before you publish (CE-041) opens on Mark ready once Quality is live,
-  // with the nudge to the first open to-do behind it.
-  const [publishOpen, setPublishOpen] = useState(false);
-  const openBeforePublish = () => {
-    setPublishOpen(true);
-    nudgeAt('markReady');
+  // with the nudge to the first open to-do behind it, and on Export (CE-057),
+  // with Ready to paste read from the page as it is then (its links as they
+  // are read).
+  const [publishOpen, setPublishOpen] = useState<{
+    mode: 'markReady' | 'export';
+    html: string;
+  } | null>(null);
+  const openBeforePublish = (mode: 'markReady' | 'export') => {
+    setPublishOpen({ mode, html: pageToPublish() });
+    if (mode === 'markReady') nudgeAt('markReady');
   };
+  // Read once per change (a link read landing, the title), not on every render.
+  const readyToPaste = useMemo((): ReadyToPaste | null => {
+    if (!publishOpen) return null;
+    const { html } = publishOpen;
+    const { links, images } = pasteChecks(html, linkChecks);
+    return {
+      placeholders: exportPlaceholders(html) + titlePlaceholders(title, html),
+      imagesWithoutAlt: images.withoutAlt,
+      linksBroken: links.broken,
+      linksUnread: links.count - links.read,
+    };
+  }, [publishOpen, linkChecks, title]);
   /** Marks it ready; past Before you publish's warning, logged with its facts. */
   const markReady = async (anyway?: ReadyAnyway) => {
     setMarking(true);
@@ -1635,7 +1658,7 @@ export function DraftEditor({
                 disabled={!editor}
                 title={t('export.hint')}
                 aria-label={t('export.button')}
-                onClick={() => openExport()}
+                onClick={() => openBeforePublish('export')}
               >
                 <Download className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">{t('export.button')}</span>
@@ -1652,7 +1675,7 @@ export function DraftEditor({
                 autosave.state === 'conflict' ||
                 autosave.state === 'too_large'
               }
-              onClick={() => (quality ? openBeforePublish() : void markReady())}
+              onClick={() => (quality ? openBeforePublish('markReady') : void markReady())}
             >
               {marking ? <LoadingDots /> : !canMarkReady && <Check className="h-3.5 w-3.5" />}
               {t('markReady')}
@@ -1943,9 +1966,19 @@ export function DraftEditor({
         />
       )}
 
-      {quality && publishOpen && (
+      {quality && publishOpen && readyToPaste && (
         <BeforePublish
-          onClose={() => setPublishOpen(false)}
+          mode={publishOpen.mode}
+          paste={readyToPaste}
+          onFillNow={() => {
+            setPublishOpen(null);
+            fillFirstPlaceholder();
+          }}
+          onContinue={() => {
+            setPublishOpen(null);
+            openExport();
+          }}
+          onClose={() => setPublishOpen(null)}
           quality={quality}
           title={title}
           isNew={draft.method === 'create'}
@@ -1953,11 +1986,11 @@ export function DraftEditor({
           image={firstImage(pageHtml)}
           linksPending={linksPending}
           onMarkReady={(anyway) => {
-            setPublishOpen(false);
+            setPublishOpen(null);
             void markReady(anyway ?? undefined);
           }}
           onFixFirst={(show) => {
-            setPublishOpen(false);
+            setPublishOpen(null);
             openPanelTab('quality');
             if (show) showInPage(show, { focus: true });
           }}
