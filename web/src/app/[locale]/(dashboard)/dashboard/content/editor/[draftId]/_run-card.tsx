@@ -16,6 +16,7 @@ export function RunCard({
   detail,
   action,
   info,
+  data,
   blocked,
   children,
 }: {
@@ -25,9 +26,11 @@ export function RunCard({
   action?: React.ReactNode;
   /** What the button does, in the ⓘ's tip. */
   info: React.ReactNode;
+  /** The data the agent writes from, right under the card (CE-032). */
+  data?: React.ReactNode;
   /** Why the agent can't run now, or null. */
   blocked?: string | null;
-  /** Under the card: the advice line, the data it uses. */
+  /** Last, under the reason: the advice line, the usage, a question the button asked. */
   children?: React.ReactNode;
 }) {
   const t = useTranslations('contentEditor.editor.run');
@@ -59,6 +62,7 @@ export function RunCard({
           </TooltipContent>
         </Tooltip>
       </div>
+      {data}
       {/* Always there, so a screen reader hears the reason when it comes. */}
       <p
         role="status"

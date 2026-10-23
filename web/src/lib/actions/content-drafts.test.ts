@@ -587,6 +587,8 @@ describe('agent suggestions', () => {
       reason: 'answer a fan-out',
       ruleKeys: ['dated'],
       status: 'open',
+      // When the run left it, for "Last used by Content Agent".
+      createdAt: '2026-10-21T10:00:00Z',
     });
     expect(calls[0].filters).toContainEqual(['eq', 'draft_id', DRAFT]);
     // The latest batch is found first; only its rows are read whole.

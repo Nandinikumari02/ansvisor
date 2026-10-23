@@ -18,6 +18,7 @@ const setContentDraftPageType = vi.fn();
 const getContentImpact = vi.fn();
 const getContentResults = vi.fn();
 const getDraftSources = vi.fn();
+const setDraftSourceIncluded = vi.fn();
 const getDraftBrief = vi.fn();
 const rebuildDraftBrief = vi.fn();
 const saveDraftRules = vi.fn();
@@ -46,6 +47,7 @@ vi.mock('@/lib/actions/content-drafts', () => ({
   saveMyRuleSet: (...args: unknown[]) => saveMyRuleSet(...args),
   saveDraftRules: (...args: unknown[]) => saveDraftRules(...args),
   getDraftSources: (...args: unknown[]) => getDraftSources(...args),
+  setDraftSourceIncluded: (...args: unknown[]) => setDraftSourceIncluded(...args),
   getDraftBrief: (...args: unknown[]) => getDraftBrief(...args),
   rebuildDraftBrief: (...args: unknown[]) => rebuildDraftBrief(...args),
   getContentImpact: (...args: unknown[]) => getContentImpact(...args),
@@ -1684,13 +1686,13 @@ describe('the side panel', () => {
     expect(getDraftSources).toHaveBeenCalledTimes(1);
     expect(panel()!.textContent).not.toContain('pipeline forecasting');
 
+    // The tab counts the sources in use, from the editor's one read.
     const tab = [...panel()!.querySelectorAll<HTMLElement>('[role="tab"]')].find(
-      (el) => el.textContent === 'Sources',
+      (el) => tabName(el) === 'Sources',
     )!;
-    await act(async () => {
-      tab.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-      tab.click();
-    });
+    expect(tab.querySelector('[aria-hidden]')!.textContent).toBe('1');
+    expect(tab.querySelector('.sr-only')!.textContent).toBe('1 source in use');
+    await pickTab('Sources');
     // The tab shows the editor's one read: nothing is read again.
     expect(getDraftSources).toHaveBeenCalledTimes(1);
     // The draft's H1 carries the fan-out's words.
@@ -1803,6 +1805,92 @@ describe('the side panel', () => {
     expect(
       [...panel()!.querySelectorAll<HTMLInputElement>('input')].map((input) => input.value),
     ).toContain('forecast accuracy, pipeline');
+  });
+
+  it('says under Run Agent which sources the agent writes from, live as Sources changes them', async () => {
+    getDraftSources.mockResolvedValue({
+      data: {
+        prompts: [],
+        fanouts: [
+          { query: 'pipeline forecasting', platforms: ['copilot-web'], searched: 2 },
+          { query: 'forecast accuracy tips', platforms: ['chatgpt'], searched: 1 },
+        ],
+        citedPages: [],
+        gscQueries: [],
+        brandDomains: [],
+        competitorDomains: [],
+      },
+      choices: [],
+    });
+    setDraftSourceIncluded.mockResolvedValue(undefined);
+    getContentDraft.mockResolvedValue(draft());
+    window.innerWidth = 1440;
+    await renderPage();
+
+    const line = () =>
+      [...panel()!.querySelectorAll('p')].find((p) => p.textContent?.startsWith('Uses your data'));
+    expect(line()!.textContent).toBe(
+      'Uses your data: 0 prompts · 2 fan-outs · 0 cited pages · 0 Search Console queries · Edit sources',
+    );
+    // Edit sources opens them.
+    await act(async () => button('Edit sources')!.click());
+    expect(selectedTab()).toBe('Sources');
+    // Turning one off lowers the count under Run Agent at once.
+    const box = panel()!.querySelector<HTMLElement>(
+      '[role="checkbox"][aria-label="Use pipeline forecasting"]',
+    )!;
+    await act(async () => box.click());
+    expect(setDraftSourceIncluded).toHaveBeenCalledWith('d1', {
+      kind: 'fanout',
+      ref: 'pipeline forecasting',
+      included: false,
+    });
+    await pickTab('Rules');
+    expect(line()!.textContent).toContain('· 1 fan-out ·');
+    // Brief says the same under its card.
+    await pickTab('Brief');
+    expect(
+      [...panel()!.querySelectorAll('p')].filter((p) =>
+        p.textContent?.startsWith('Uses your data'),
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('says nothing of the data while the sources can’t be read', async () => {
+    // The default read fails (null): no line, no count on the tab.
+    getContentDraft.mockResolvedValue(draft());
+    window.innerWidth = 1440;
+    await renderPage();
+    expect(panel()!.textContent).not.toContain('Uses your data');
+    expect(panel()!.textContent).not.toContain('No sources kept yet');
+    expect(panel()!.querySelector('[role="tab"] [title]')).toBeNull();
+  });
+
+  it('says when the agent last wrote from the sources: a page it wrote, not a run that failed', async () => {
+    getDraftSources.mockResolvedValue({
+      data: {
+        prompts: [],
+        fanouts: [],
+        citedPages: [],
+        gscQueries: [],
+        brandDomains: [],
+        competitorDomains: [],
+      },
+      choices: [],
+    });
+    const wrote = new Date(Date.now() - 2 * 60_000).toISOString();
+    getContentDraft.mockResolvedValue(draft({ agentState: null, agentSince: wrote }));
+    window.innerWidth = 1440;
+    await renderPage();
+    await pickTab('Sources');
+    expect(panel()!.textContent).toContain('Last used by Content Agent · 2 minutes ago');
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    getContentDraft.mockResolvedValue(draft({ agentState: 'failed', agentSince: wrote }));
+    await renderPage();
+    await pickTab('Sources');
+    expect(panel()!.textContent).toContain('Not used by Content Agent yet');
   });
 
   it('shows how many rules the page meets, and opens them from the header', async () => {

@@ -57,6 +57,7 @@ export function BriefTab({
   onRetry,
   onSaved,
   rewrite,
+  dataLine,
 }: {
   draftId: string;
   state: BriefState;
@@ -71,6 +72,8 @@ export function BriefTab({
   onSaved: (brief: DraftBrief) => void;
   /** Absent once the page is ready or published. */
   rewrite?: AgentRewrite;
+  /** "Uses your data", under Run Agent's card (v1.1 CE-032). */
+  dataLine?: React.ReactNode;
 }) {
   const t = useTranslations('contentEditor.editor.brief');
   const tTypes = useTranslations('contentEditor.pageTypes');
@@ -136,9 +139,10 @@ export function BriefTab({
           </Button>
         }
         info={t('info')}
+        data={dataLine}
       >
         <p className="text-[11px] text-muted-foreground">{t('usage')}</p>
-        {/* Right under the button that asked, not past the outline. */}
+        {/* Under the card that asked, not past the outline. */}
         {confirming && (
           <div role="alert" className="space-y-2 rounded-md border px-3 py-2 text-xs">
             <p>{t('rebuildEdited')}</p>

@@ -1347,6 +1347,8 @@ export function DraftEditor({
             agentFix={agentFix}
             pageRewrite={pageRewrite}
             agentRewrite={agentRewrite}
+            // One batch, one run: its first suggestion's time is the run's.
+            lastSuggestionAt={suggestions[0]?.createdAt ?? null}
           />
         ) : (
           <EditorPanelRail onOpen={openPanelTab} />
