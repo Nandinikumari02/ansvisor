@@ -74,6 +74,7 @@ import {
 } from '@/lib/content/clean-html';
 import { PAGE_READ_DELAY_MS, draftTitleFromDoc, safeLinkHref } from '@/lib/content/editor';
 import { JsonLd } from '@/lib/content/json-ld-node';
+import { firstImage } from '@/lib/content/page-schema';
 import { detectPageType } from '@/lib/content/page-types';
 import { BAND_CLASSES, qualityAverage, qualityBand, qualityPhase } from '@/lib/content/quality';
 import { eeat, linksToCheck, trust, trustBlocks } from '@/lib/content/quality-checks';
@@ -86,6 +87,7 @@ import { useBrandStore } from '@/stores/use-brand-store';
 import { AgentCard } from './_agent-card';
 import { AgentDrafting, draftingKey } from './_agent-drafting';
 import { AuthorMenu } from './_author-menu';
+import { BeforePublish, type ReadyAnyway } from './_before-publish';
 import { FlashBlock, findBlock, flashKey } from './_flash-block';
 import { useAgentRun } from './_use-agent-run';
 import { useLinkChecks } from './_use-link-checks';
@@ -458,7 +460,12 @@ export function DraftEditor({
     [qualityOn, authorsRead, pageAuthor],
   );
   const pageBlocks = useMemo(() => (qualityOn ? trustBlocks(pageHtml) : []), [qualityOn, pageHtml]);
-  const linkChecks = useLinkChecks(draft.id, autosave.savedAt, linksToCheck(pageBlocks), qualityOn);
+  const { checks: linkChecks, pending: linksPending } = useLinkChecks(
+    draft.id,
+    autosave.savedAt,
+    linksToCheck(pageBlocks),
+    qualityOn,
+  );
   const brandDomains = reads.sources?.data?.brandDomains;
   // The site's trust (Site Audit, CE-043), read once: Trust's last 5 points.
   const [siteTrust, setSiteTrust] = useState<SiteTrust | null>(null);
@@ -903,10 +910,17 @@ export function DraftEditor({
    * Quality's Show: the block of the page holding the passage (never a
    * suggestion's card), scrolled to and marked for a moment.
    */
-  const showInPage = (text: string) => {
+  const showInPage = (text: string, { focus = false } = {}) => {
     if (!editor) return;
     const at = findBlock(editor.state.doc, text);
     if (!at) return;
+    // The caret at the passage, to fix it there (Before you publish's Fix first).
+    if (focus)
+      editor
+        .chain()
+        .setTextSelection(at.from + 1)
+        .focus(undefined, { scrollIntoView: false })
+        .run();
     (editor.view.nodeDOM(at.from) as HTMLElement | null)?.scrollIntoView({
       block: 'center',
       behavior: 'smooth',
@@ -1380,9 +1394,15 @@ export function DraftEditor({
                 : null,
       }
     : undefined;
-  const markReady = async () => {
-    // Opened with to-dos open: the nudge names the first; marking goes on.
+  // Before you publish (CE-041) opens on Mark ready once Quality is live,
+  // with the nudge to the first open to-do behind it.
+  const [publishOpen, setPublishOpen] = useState(false);
+  const openBeforePublish = () => {
+    setPublishOpen(true);
     nudgeAt('markReady');
+  };
+  /** Marks it ready; past Before you publish's warning, logged with its facts. */
+  const markReady = async (anyway?: ReadyAnyway) => {
     setMarking(true);
     try {
       // What's waiting goes out first, so the ready draft (and the version
@@ -1394,7 +1414,9 @@ export function DraftEditor({
         toast.error(t('markReadyUnsaved'));
         return;
       }
-      const next = await markContentDraftReady(draft.id);
+      const next = await (anyway
+        ? markContentDraftReady(draft.id, anyway)
+        : markContentDraftReady(draft.id));
       setStatus(next.status);
       toast.success(
         next.tasksDone > 0 && draft.action
@@ -1508,7 +1530,7 @@ export function DraftEditor({
                 autosave.state === 'conflict' ||
                 autosave.state === 'too_large'
               }
-              onClick={markReady}
+              onClick={() => (quality ? openBeforePublish() : void markReady())}
             >
               {marking ? <LoadingDots /> : !canMarkReady && <Check className="h-3.5 w-3.5" />}
               {t('markReady')}
@@ -1775,6 +1797,27 @@ export function DraftEditor({
           <EditorPanelRail onOpen={openPanelTab} />
         )}
       </div>
+
+      {quality && publishOpen && (
+        <BeforePublish
+          onClose={() => setPublishOpen(false)}
+          quality={quality}
+          title={title}
+          isNew={draft.method === 'create'}
+          pageType={pageType}
+          image={firstImage(pageHtml)}
+          linksPending={linksPending}
+          onMarkReady={(anyway) => {
+            setPublishOpen(false);
+            void markReady(anyway ?? undefined);
+          }}
+          onFixFirst={(show) => {
+            setPublishOpen(false);
+            openPanelTab('quality');
+            if (show) showInPage(show, { focus: true });
+          }}
+        />
+      )}
 
       <Dialog open={held !== null} onOpenChange={(open) => !open && setHeld(null)}>
         <DialogContent className="max-w-md">
