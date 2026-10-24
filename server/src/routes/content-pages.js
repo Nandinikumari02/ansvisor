@@ -6,11 +6,16 @@ import { assertBrandAccess } from '../lib/access.js';
 import { onBrandDomain } from '../lib/audit/host.js';
 import { MAX_SOURCE_SITES, linkedSites, readSourceClasses } from '../lib/content-source-class.js';
 import { qualityPhase } from '../lib/content-quality.js';
+import { readDraftClaims } from '../lib/content-quality-claims.js';
 import { checkLinks, reserveReads } from '../lib/link-check.js';
 import { MAX_CONTENT_LENGTH, extractPageContent } from '../lib/page-content.js';
 import { PageFetchError, fetchPage } from '../lib/safe-fetch.js';
 import { PlanLimitError } from '../lib/plan-guard.js';
-import { linkCheckLimiter, qualityCheckLimiter } from '../middleware/rate-limiter.js';
+import {
+  claimsLimiter,
+  linkCheckLimiter,
+  qualityCheckLimiter,
+} from '../middleware/rate-limiter.js';
 
 /**
  * Pages brought into the Content Editor (CE-003): Optimize content › Page
@@ -189,6 +194,57 @@ router.post('/source-classes', qualityCheckLimiter, async (req, res) => {
       'content source class error',
     );
     return res.status(500).json({ error: 'Failed to read the sources', code: 'failed' });
+  }
+});
+
+const claimsBody = z.object({
+  draftId: z.guid(),
+  // The paragraph the person is writing in, as saved: read once they leave it.
+  skip: z.string().max(20000).optional(),
+});
+
+/**
+ * POST /api/content-pages/claims { draftId, skip? } (Quality CE-045): the
+ * claims in the draft's own paragraphs, as saved, that a reader would want
+ * a source for, read by the model a paragraph at a time and kept by the
+ * paragraph (content_quality_claims). Off until Quality's phase 2 is live.
+ * A spent AI budget answers 429 ai_budget: the editor leaves the claims it
+ * hasn't read out of Trust.
+ */
+router.post('/claims', claimsLimiter, async (req, res) => {
+  if (qualityPhase() < 2) return res.status(404).json({ error: 'Not available', code: 'off' });
+  const parsed = claimsBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'invalid', code: 'invalid' });
+  try {
+    const { data: draft, error } = await supabaseAdmin
+      .from('content_drafts')
+      .select('brand_id, body_html')
+      .eq('id', parsed.data.draftId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!draft) return res.status(404).json({ error: 'Draft not found', code: 'not_found' });
+    const { orgId } = await assertBrandAccess(draft.brand_id, req.user.id);
+    const result = await readDraftClaims({
+      orgId,
+      draftId: parsed.data.draftId,
+      html: draft.body_html ?? '',
+      skip: parsed.data.skip,
+    });
+    return res.json(result);
+  } catch (err) {
+    if (err instanceof PlanLimitError) {
+      return res.status(429).json({ error: err.message, code: 'ai_budget' });
+    }
+    if (err?.status === 403 || err?.status === 404) {
+      return res.status(err.status).json({ error: err.message, code: 'forbidden' });
+    }
+    // Not the whole error: a provider's (APICallError, a RetryError of them)
+    // carries the request, the page's paragraphs.
+    req.log.error(
+      { err: { name: err?.name, message: err?.message, stack: err?.stack } },
+      'content claims error',
+    );
+    return res.status(500).json({ error: 'Failed to read the claims', code: 'failed' });
   }
 });
 

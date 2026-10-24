@@ -41,6 +41,11 @@ vi.mock('../lib/plan-guard.js', async (importOriginal) => ({
   getOrgIdForUser: async () => org,
 }));
 const readSourceClasses = vi.fn();
+const logError = vi.fn();
+const readDraftClaims = vi.fn();
+vi.mock('../lib/content-quality-claims.js', () => ({
+  readDraftClaims: (...args) => readDraftClaims(...args),
+}));
 vi.mock('../lib/content-source-class.js', async (importOriginal) => ({
   ...(await importOriginal()),
   readSourceClasses: (...args) => readSourceClasses(...args),
@@ -91,7 +96,7 @@ beforeEach(async () => {
   app.use(express.json());
   app.use((req, _res, next) => {
     req.user = { id: 'u1' };
-    req.log = { error: vi.fn() };
+    req.log = { error: logError };
     next();
   });
   app.use('/api/content-pages', router);
@@ -268,5 +273,81 @@ describe('POST /api/content-pages/source-classes (Quality CE-046)', () => {
     expect((await ask({ draftId: 'nope', sites: ['a.example'] })).status).toBe(400);
     expect((await ask({ draftId: DRAFT, sites: [] })).status).toBe(400);
     expect(readSourceClasses).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/content-pages/claims (Quality CE-045)', () => {
+  const DRAFT = '5e8cd4c2-2bc4-4fb7-8711-bc0ad1bb4a29';
+  const ask = (body) =>
+    fetch(`${baseUrl}/claims`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  beforeEach(() => {
+    vi.stubEnv('CONTENT_QUALITY_PHASE', '2');
+    draftRow = {
+      brand_id: BRAND,
+      body_html: '<p>Ledgerly is the fastest app for teams like yours.</p>',
+    };
+    readDraftClaims.mockReset().mockResolvedValue({
+      paragraphs: [
+        {
+          text: 'Ledgerly is the fastest app for teams like yours.',
+          claims: [{ text: 'the fastest app', kind: 'superlative' }],
+        },
+      ],
+      pending: 0,
+      limited: false,
+    });
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("reads the draft's own paragraphs as saved, leaving the one being written", async () => {
+    const res = await ask({ draftId: DRAFT, skip: 'Ledgerly is the fastest' });
+    expect(res.status).toBe(200);
+    expect((await res.json()).paragraphs[0].claims).toEqual([
+      { text: 'the fastest app', kind: 'superlative' },
+    ]);
+    expect(readDraftClaims).toHaveBeenCalledWith({
+      orgId: 'o1',
+      draftId: DRAFT,
+      html: draftRow.body_html,
+      skip: 'Ledgerly is the fastest',
+    });
+  });
+
+  it('is off before Quality’s phase 2, and says when the AI budget is spent', async () => {
+    vi.stubEnv('CONTENT_QUALITY_PHASE', '1');
+    expect((await ask({ draftId: DRAFT })).status).toBe(404);
+    vi.stubEnv('CONTENT_QUALITY_PHASE', '2');
+    readDraftClaims.mockRejectedValueOnce(new PlanLimitError('used up', 429));
+    const res = await ask({ draftId: DRAFT });
+    expect(res.status).toBe(429);
+    expect((await res.json()).code).toBe('ai_budget');
+  });
+
+  it('refuses another workspace’s draft and a malformed ask', async () => {
+    org = 'o2';
+    expect((await ask({ draftId: DRAFT })).status).toBe(403);
+    expect((await ask({ draftId: 'nope' })).status).toBe(400);
+    expect((await ask({ draftId: DRAFT, skip: 'x'.repeat(20001) })).status).toBe(400);
+    expect(readDraftClaims).not.toHaveBeenCalled();
+  });
+
+  it('logs a failure without the request the provider sent: the page’s paragraphs', async () => {
+    logError.mockClear();
+    readDraftClaims.mockRejectedValueOnce(
+      Object.assign(new Error('Bad Request'), {
+        name: 'AI_APICallError',
+        requestBodyValues: { prompt: 'Paragraphs:\n[1] the page’s own words' },
+      }),
+    );
+    expect((await ask({ draftId: DRAFT })).status).toBe(500);
+    expect(logError).toHaveBeenCalledWith(
+      { err: expect.objectContaining({ name: 'AI_APICallError', message: 'Bad Request' }) },
+      'content claims error',
+    );
+    expect(JSON.stringify(logError.mock.calls)).not.toContain('own words');
   });
 });

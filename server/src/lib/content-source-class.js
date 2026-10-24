@@ -2,6 +2,7 @@ import { NoObjectGeneratedError, generateObject } from 'ai';
 import { z } from 'zod';
 import supabaseAdmin from '../config/supabase.js';
 import { resolveModel } from './ai-provider.js';
+import { QUALITY_CALLS_PER_DAY, qualityCallsToday } from './content-quality-calls.js';
 import { logger } from './logger.js';
 import { PlanLimitError, reserveAiBudget } from './plan-guard.js';
 
@@ -36,9 +37,11 @@ export const UNKNOWN_CLASS_DAYS = 1;
  */
 export const SOURCE_CLASS_HOLD_USD = 0.001;
 /**
- * The sites one draft may have the model read in a day, a call each: two
- * asks of MAX_SOURCE_SITES new ones. A site read for one workspace is kept
- * for all, so most are read once.
+ * The sites one draft is sure to have the model read in a day, a call
+ * each: two asks of MAX_SOURCE_SITES new ones. They share the day's
+ * Quality calls (QUALITY_CALLS_PER_DAY) with the claims, which leave them
+ * this many (LEFT_FOR_SOURCES). A site read for one workspace is kept for
+ * all, so most are read once.
  */
 export const SOURCE_READS_PER_DAY = 40;
 const CALL_TIMEOUT_MS = 30_000;
@@ -158,11 +161,12 @@ async function readSite({ orgId, draftId, site, modelId }) {
  * The kinds of these sites (the ones a draft links), read where kept and by
  * the model for the rest, a call each, SITES_AT_ONCE at a time,
  * MAX_SOURCE_SITES at most: { classes: [{ site, kind }], limited }.
- * `limited` when the draft's SOURCE_READS_PER_DAY reads today don't cover
- * them all: the sites not read are left out. A read that fails leaves its
- * site out (asked about again after the next save) and the others' reads
- * kept; when every read fails, its error is thrown, a spent budget's first
- * (PlanLimitError, 429: the editor pauses the reads).
+ * `limited` when the draft's Quality calls left today
+ * (QUALITY_CALLS_PER_DAY, with the claims' reads) don't cover them all: the
+ * sites not read are left out. A read that fails leaves its site out (asked
+ * about again after the next save) and the others' reads kept; when every
+ * read fails, its error is thrown, a spent budget's first (PlanLimitError,
+ * 429: the editor pauses the reads).
  *
  * @param {{ orgId: string, draftId: string, sites: string[] }} input
  */
@@ -190,16 +194,7 @@ export async function readSourceClasses({ orgId, draftId, sites }) {
   const missing = asked.filter((site) => !kinds.has(site));
   if (!missing.length) return answer(false);
 
-  const dayAgo = new Date(Date.now() - 86_400_000).toISOString();
-  const { count, error: countError } = await supabaseAdmin
-    .from('prompt_improve_usage')
-    .select('id', { count: 'exact', head: true })
-    .eq('organization_id', orgId)
-    .eq('content_draft_id', draftId)
-    .eq('feature', 'quality')
-    .gte('used_at', dayAgo);
-  if (countError) throw new Error(countError.message);
-  const room = SOURCE_READS_PER_DAY - (count ?? 0);
+  const room = QUALITY_CALLS_PER_DAY - (await qualityCallsToday(orgId, draftId));
   if (room <= 0) return answer(true);
 
   const modelId = sourceClassModelId();

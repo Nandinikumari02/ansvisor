@@ -65,13 +65,13 @@ const { PlanLimitError } = await import('./plan-guard.js');
 const { logger } = await import('./logger.js');
 const {
   SOURCE_CLASS_HOLD_USD,
-  SOURCE_READS_PER_DAY,
   buildSourceClassPrompt,
   keptSite,
   linkedSites,
   readSourceClasses,
   siteOf,
 } = await import('./content-source-class.js');
+const { QUALITY_CALLS_PER_DAY } = await import('./content-quality-calls.js');
 
 beforeEach(() => {
   spentFrom = null;
@@ -229,7 +229,7 @@ describe('readSourceClasses', () => {
   });
 
   it('reads no more for a draft past its reads today, giving what is kept', async () => {
-    readsToday = SOURCE_READS_PER_DAY;
+    readsToday = QUALITY_CALLS_PER_DAY;
     kept = [{ host: 'news.example', kind: 'secondary' }];
     expect(await read(['news.example', 'coffee-blog.example'])).toEqual({
       classes: [{ site: 'news.example', kind: 'secondary' }],
@@ -238,8 +238,8 @@ describe('readSourceClasses', () => {
     expect(generateObject).not.toHaveBeenCalled();
   });
 
-  it('reads as many sites as the day has reads left: each site counts', async () => {
-    readsToday = SOURCE_READS_PER_DAY - 1;
+  it('reads as many sites as the day has Quality calls left: each site counts', async () => {
+    readsToday = QUALITY_CALLS_PER_DAY - 1;
     const result = await read(['coffee-blog.example', 'roaster.example']);
     expect(asked()).toEqual(['Site: coffee-blog.example']);
     expect(result).toEqual({
