@@ -10,7 +10,7 @@ import StarterKit from '@tiptap/starter-kit';
 import { TableKit } from '@tiptap/extension-table';
 import Image from '@tiptap/extension-image';
 import { CharacterCount, Placeholder } from '@tiptap/extensions';
-import { ArrowLeft, Bot, Check, Copy, Download, PanelRight, Target, X } from 'lucide-react';
+import { ArrowLeft, Bot, Check, Copy, Download, PanelRight, Send, Target, X } from 'lucide-react';
 import { Link, useRouter } from '@/i18n/navigation';
 import { Button } from '@/components/ui/button';
 import { buttonVariants } from '@/components/ui/button-variants';
@@ -26,6 +26,7 @@ import { LoadingDots } from '@/components/ui/loading-dots';
 import { AiUsageBanner } from '@/components/ai-usage/ai-usage-banner';
 import { AiUsageMeter } from '@/components/ai-usage/ai-usage-meter';
 import { useAiUsage } from '@/components/providers/ai-usage-provider';
+import { useUserRole } from '@/hooks/use-user-role';
 import { PLATFORM_LABELS } from '@/config/platform-labels';
 import { DraftMethodBadge, DraftStatusBadge } from '@/components/content/draft-badges';
 import {
@@ -134,6 +135,7 @@ import {
   type HeldEdit,
 } from './_cited-passages';
 import { ExportDialog, type ExportDestination } from './_export-dialog';
+import { SendDialog } from './_send-dialog';
 import { ExportMenu } from './_export-menu';
 import { sourceDetail } from './_sources-tab';
 import { HistoryMenu } from './_history-menu';
@@ -1588,10 +1590,47 @@ export function DraftEditor({
   // with Ready to paste read from the page as it is then (its links as they
   // are read).
   const [publishOpen, setPublishOpen] = useState<{
-    mode: 'markReady' | 'export';
+    mode: 'markReady' | 'export' | 'send';
     html: string;
   } | null>(null);
-  const openBeforePublish = (mode: 'markReady' | 'export') => {
+  // Send to CMS (#1331): admins and managers send the page to the brand's
+  // webhook, as the page Export makes ready, past Before you publish once
+  // Quality is live.
+  const { canManage } = useUserRole();
+  const [sendOpen, setSendOpen] = useState<{ html: string } | null>(null);
+  const [preparing, setPreparing] = useState(false);
+  // HTML edited in the HTML view and not applied isn't in the page to save.
+  const htmlUnapplied = htmlSource !== null && htmlEdited;
+  // What's waiting goes out first, as for Mark ready: the CMS gets the page
+  // Ansvisor holds, the one its callback later marks Published. A page that
+  // can't be saved (a teammate or the agent changed it meanwhile) isn't sent.
+  const openSend = async () => {
+    if (preparing) return;
+    if (htmlUnapplied) {
+      toast.error(t('send.applyHtml'));
+      return;
+    }
+    setPreparing(true);
+    const saved = await autosave.settle().then(
+      () => true,
+      () => false,
+    );
+    setPreparing(false);
+    if (!saved) {
+      toast.error(t('send.unsaved'));
+      return;
+    }
+    setSendOpen({ html: pageToPublish() });
+  };
+  const startSend = () => {
+    if (htmlUnapplied) {
+      toast.error(t('send.applyHtml'));
+      return;
+    }
+    if (quality) openBeforePublish('send');
+    else void openSend();
+  };
+  const openBeforePublish = (mode: 'markReady' | 'export' | 'send') => {
     setPublishOpen({ mode, html: pageToPublish() });
     if (mode === 'markReady') nudgeAt('markReady');
   };
@@ -2006,6 +2045,24 @@ export function DraftEditor({
             ) : (
               <ExportMenu disabled={!editor} onExport={(format) => void exportPage(format)} />
             )}
+            {canManage && (
+              <HeaderTip label={t('send.button')} hint={t('send.hint')}>
+                <Button
+                  variant="outline"
+                  size="icon-sm"
+                  disabled={
+                    !editor ||
+                    preparing ||
+                    autosave.state === 'conflict' ||
+                    autosave.state === 'too_large'
+                  }
+                  aria-label={t('send.button')}
+                  onClick={startSend}
+                >
+                  {preparing ? <LoadingDots /> : <Send className="h-3.5 w-3.5" />}
+                </Button>
+              </HeaderTip>
+            )}
             {/* The one black button. Marked, it reads Ready (a click moves it back
                 to review); published, Published. Narrower than 1024px, ✓ alone. */}
             {status === 'ready' || status === 'published' ? (
@@ -2358,6 +2415,25 @@ export function DraftEditor({
         />
       )}
 
+      {sendOpen && (
+        <SendDialog
+          draftId={draft.id}
+          brandId={draft.brandId}
+          title={title}
+          html={sendOpen.html}
+          sourceUrl={draft.sourceUrl}
+          author={pageAuthor}
+          // Until the authors are read, who it is by isn't known.
+          teamByline={authorsRead ? t('author.organization', { brand: brandName }) : ''}
+          byline={contentByline}
+          onFillNow={() => {
+            setSendOpen(null);
+            fillFirstPlaceholder();
+          }}
+          onClose={() => setSendOpen(null)}
+        />
+      )}
+
       {quality && publishOpen && readyToPaste && (
         <BeforePublish
           mode={publishOpen.mode}
@@ -2368,8 +2444,10 @@ export function DraftEditor({
           }}
           contentByline={contentByline}
           onContinue={() => {
+            const next = publishOpen.mode;
             setPublishOpen(null);
-            openExport();
+            if (next === 'send') void openSend();
+            else openExport();
           }}
           onClose={() => setPublishOpen(null)}
           quality={quality}
