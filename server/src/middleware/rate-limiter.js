@@ -101,6 +101,20 @@ export const claimsLimiter = rateLimit({
   },
 });
 
+// A brand's facts read from its site again when asked (Quality CE-047): a
+// few model calls, so its own bucket.
+export const brandFactsLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  keyGenerator: apiLimiterKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many requests, please try again later.',
+  },
+});
+
 // Stricter limit for public/unauthenticated endpoints: 30 requests per 15 minutes
 export const publicLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
