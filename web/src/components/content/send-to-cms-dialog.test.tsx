@@ -162,6 +162,10 @@ describe('SendDialog', () => {
     await render({ title: ' ' });
     expect(dialog().textContent).toContain('Give the page a title first');
     expect(button('Send').disabled).toBe(true);
+    // Past what the server takes.
+    await render({ html: `<h1>Pour-over</h1><p>${'a'.repeat(1_000_000)}</p>` });
+    expect(dialog().textContent).toContain('The page is over a million characters');
+    expect(button('Send').disabled).toBe(true);
   });
 
   it('holds the send while the last send can’t be read, and reads it again', async () => {
