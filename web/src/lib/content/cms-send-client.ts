@@ -83,6 +83,77 @@ export async function sendPagesToCms(brandId: string, pages: CmsPage[]): Promise
   }
 }
 
+/** A draft's last send, as the Library shows it beside its status. */
+export interface CmsStatus {
+  status: CmsDelivery['status'];
+  /** When it was published, sent or queued. */
+  at: string;
+  /** What the webhook answered, when it did; else why it wasn't reached. */
+  httpStatus: number | null;
+  error: string | null;
+  publishedUrl: string | null;
+}
+
+/** Ids a read takes: content_draft_last_deliveries (00262) reads up to 500. */
+const STATUS_IDS_PER_READ = 500;
+/**
+ * A send still queued after this was left by a server that stopped mid-batch
+ * (00262 closes it at the workspace's next send): it reads as interrupted,
+ * so neither the Library nor the editor waits on it or says it is still
+ * going. Read by the browser's clock: one 30 minutes fast would read a send
+ * under way as interrupted, until its next read.
+ */
+const INTERRUPTED_AFTER_MS = 30 * 60_000;
+
+/** A send as the Library and the editor read it: one left queued, as interrupted. */
+function lastSend(row: {
+  status: string;
+  created_at: string;
+  sent_at: string | null;
+  published_at: string | null;
+  error: string | null;
+}): { status: CmsDelivery['status']; at: string; error: string | null } {
+  const interrupted =
+    row.status === 'queued' && Date.parse(row.created_at) < Date.now() - INTERRUPTED_AFTER_MS;
+  return {
+    status: interrupted ? 'failed' : (row.status as CmsDelivery['status']),
+    at: row.published_at ?? row.sent_at ?? row.created_at,
+    error: interrupted ? 'Not sent: interrupted' : row.error,
+  };
+}
+
+/**
+ * Each draft's last send, for the Library's rows: one row a draft, however
+ * often it was sent. A read that fails (its function not there yet, 00262)
+ * leaves its drafts with none.
+ */
+export async function readCmsStatuses(draftIds: string[]): Promise<Map<string, CmsStatus>> {
+  const supabase = createClient();
+  const chunks: string[][] = [];
+  for (let i = 0; i < draftIds.length; i += STATUS_IDS_PER_READ) {
+    chunks.push(draftIds.slice(i, i + STATUS_IDS_PER_READ));
+  }
+  const reads = await Promise.all(
+    chunks.map((ids) => supabase.rpc('content_draft_last_deliveries', { p_draft_ids: ids })),
+  );
+  const statuses = new Map<string, CmsStatus>();
+  for (const { data, error } of reads) {
+    if (error) {
+      console.error('Failed to read the pages’ sends:', error);
+      continue;
+    }
+    for (const row of data ?? []) {
+      if (!row.draft_id) continue;
+      statuses.set(row.draft_id, {
+        ...lastSend(row),
+        httpStatus: row.http_status,
+        publishedUrl: row.published_url,
+      });
+    }
+  }
+  return statuses;
+}
+
 /** What a draft keeps of its sends: its slug and meta, where it went live, and its last send. */
 export interface DraftCms {
   fields: Partial<CmsFields>;
@@ -105,7 +176,7 @@ export async function readDraftCms(draftId: string): Promise<DraftCms | null> {
       .maybeSingle(),
     supabase
       .from('content_draft_deliveries')
-      .select('status, created_at, sent_at, error')
+      .select('status, created_at, sent_at, published_at, error')
       .eq('draft_id', draftId)
       .order('created_at', { ascending: false })
       .limit(1)
@@ -123,12 +194,6 @@ export async function readDraftCms(draftId: string): Promise<DraftCms | null> {
       metaDescription: draft.data.meta_description ?? undefined,
     },
     publishedUrl: draft.data.published_url,
-    last: delivery
-      ? {
-          status: delivery.status as CmsDelivery['status'],
-          at: delivery.sent_at ?? delivery.created_at,
-          error: delivery.error,
-        }
-      : null,
+    last: delivery ? lastSend(delivery) : null,
   };
 }
