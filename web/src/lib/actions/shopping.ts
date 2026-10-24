@@ -6,6 +6,7 @@ import {
   detectAmazonShareDrop,
   type AmazonShareDropAlert,
 } from '@/lib/shopping-amazon-share-alert';
+import { marketRegionCodes, type ShoppingMarket } from '@/lib/shopping/markets';
 
 /**
  * Server actions for the Shopping dashboard page. Reads from the
@@ -29,6 +30,12 @@ export interface ShoppingFilters {
   platforms?: string[];
   /** Region codes. */
   regions?: string[];
+  /**
+   * ChatGPT Shopping's market (#1278): its results and cards are kept to the
+   * market's regions, other platforms' are unaffected. Applies to the card
+   * reads and to the Overview (`p_chatgpt_regions`, 00267).
+   */
+  chatgptMarket?: ShoppingMarket;
 }
 
 export interface ShoppingKpis {
@@ -106,6 +113,7 @@ async function loadShoppingOverview(
     p_platforms: filters.platforms?.length ? filters.platforms : undefined,
     p_regions: filters.regions?.length ? filters.regions : undefined,
     p_trend_from: trendFrom,
+    p_chatgpt_regions: filters.chatgptMarket ? marketRegionCodes(filters.chatgptMarket) : undefined,
   });
   if (error) throw new Error(error.message);
   return data as unknown as ShoppingOverviewRow;
@@ -253,6 +261,14 @@ async function fetchAllCards<T>(
   return rows;
 }
 
+/**
+ * A PostgREST `or` filter keeping ChatGPT Shopping's cards to one market's
+ * regions (#1278) and letting every other platform's cards through.
+ */
+function chatgptMarketFilter(market: ShoppingMarket): string {
+  return `platform.neq.chatgpt-shopping,region.in.(${marketRegionCodes(market).join(',')})`;
+}
+
 /** A card query over the filter window: brand, dates, platforms and regions. */
 function cardsInWindow(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -267,6 +283,7 @@ function cardsInWindow(
   if (expandedTo) query = query.lte('created_at', expandedTo);
   if (filters.platforms?.length) query = query.in('platform', filters.platforms);
   if (filters.regions?.length) query = query.in('region', filters.regions);
+  if (filters.chatgptMarket) query = query.or(chatgptMarketFilter(filters.chatgptMarket));
   return query;
 }
 
@@ -522,6 +539,9 @@ export async function getCompetitorSummary(
   if (filters.platforms?.length)
     totalCardsQuery = totalCardsQuery.in('platform', filters.platforms);
   if (filters.regions?.length) totalCardsQuery = totalCardsQuery.in('region', filters.regions);
+  if (filters.chatgptMarket) {
+    totalCardsQuery = totalCardsQuery.or(chatgptMarketFilter(filters.chatgptMarket));
+  }
 
   const competitorCardsQuery = fetchAllCards<{
     matched_brand_id: string | null;
