@@ -307,6 +307,40 @@ describe('qualityTodos', () => {
     ]);
   });
 
+  it("asks to confirm the page's own image, or to add one where a spot is open (CE-049)", () => {
+    const none = { experience: false, data: false, quote: false };
+    const visualTodo = (images: number, own: number, openSpots: number) =>
+      qualityTodos({
+        eeat: eeat({ author: author(), used: none, visual: { images, own, openSpots } }),
+        author: author(),
+        hasAuthors: true,
+        used: none,
+        visual: { images, own, openSpots },
+      }).find((t) => t.id === 'visualProof');
+    expect(visualTodo(2, 0, 0)).toMatchObject({
+      done: false,
+      action: 'confirmImage',
+      count: 2,
+      score: 'eeat',
+    });
+    expect(visualTodo(2, 0, 0)!.gain).toBeGreaterThan(0);
+    expect(visualTodo(0, 0, 1)).toMatchObject({ done: false, action: 'addImage' });
+    expect(visualTodo(2, 1, 0)).toMatchObject({ done: true, action: null, gain: 0 });
+    expect(visualTodo(0, 0, 0)).toBeUndefined();
+    // Your input not read: visual proof still counts, so its to-do is still listed.
+    const unread = qualityTodos({
+      eeat: eeat({ author: author(), visual: { images: 2, own: 0, openSpots: 0 } }),
+      author: author(),
+      hasAuthors: true,
+      used: null,
+      visual: { images: 2, own: 0, openSpots: 0 },
+    });
+    expect(unread.find((t) => t.id === 'visualProof')).toMatchObject({
+      done: false,
+      action: 'confirmImage',
+    });
+  });
+
   it("keeps a linked proof checked when the next read carries its block with the link's space (review, #1468)", () => {
     const read = 'We are ISO 27001-certified for every plan.';
     const linked = 'We are ISO 27001 -certified for every plan.';

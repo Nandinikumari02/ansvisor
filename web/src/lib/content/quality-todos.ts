@@ -28,6 +28,7 @@ export type QualityTodoId =
   | 'authorProfile'
   | 'experience'
   | 'originalData'
+  | 'visualProof'
   | 'expertQuote'
   | 'proof'
   | 'brandFacts';
@@ -44,6 +45,8 @@ export type QualityTodoAction =
   | 'editAuthor'
   | 'addInput'
   | 'addProof'
+  | 'confirmImage'
+  | 'addImage'
   | 'reviewBrandFacts';
 
 export interface QualityTodo {
@@ -91,6 +94,7 @@ export function qualityTodos({
   trust = null,
   brandFacts = null,
   proofs = null,
+  visual = null,
   confirmed = null,
 }: {
   eeat: Score<EeatCheckId> | null;
@@ -120,6 +124,11 @@ export function qualityTodos({
    * session: done ones stay listed, checked.
    */
   proofs?: { asks: readonly PageProof[]; had: ReadonlySet<string> } | null;
+  /**
+   * Phase 2 (CE-049): the page's images, how many are confirmed the
+   * person's own, and the visual proof spots open (as eeat takes them).
+   */
+  visual?: { images: number; own: number; openSpots: number } | null;
   /** What the person confirmed of the author their site names (00271), or null where they can't. */
   confirmed?: { real: boolean; profile: boolean } | null;
 }): QualityTodo[] {
@@ -213,6 +222,12 @@ export function qualityTodos({
             score: 'eeat',
             action: 'addInput',
           },
+        ] satisfies QualityTodo[])
+      : []),
+    // Not Your input's: listed in its place when that can't be read too.
+    ...visualTodo(eeat, visual),
+    ...(used
+      ? ([
           {
             id: 'expertQuote',
             done: used.quote,
@@ -247,3 +262,27 @@ function shortHash(text: string): string {
  */
 export const proofKey = (ask: { claim: string; block: string }) =>
   `proof:${squeeze(ask.claim)}:${shortHash(squeeze(ask.block))}`;
+
+/**
+ * Visual proof (CE-049): an image the person took themself. Images on the
+ * page none of them confirmed: Confirm (only the person can tell their own
+ * from stock); none, with a spot open: Add image there. Checked once one
+ * is confirmed; none when the page has neither.
+ */
+function visualTodo(
+  eeat: Score<EeatCheckId>,
+  visual: { images: number; own: number; openSpots: number } | null,
+): QualityTodo[] {
+  if (!visual || (visual.images === 0 && visual.openSpots === 0)) return [];
+  const done = visual.own > 0;
+  return [
+    {
+      id: 'visualProof',
+      done,
+      gain: scoreGain(eeat, ['visualProof']),
+      score: 'eeat',
+      action: done ? null : visual.images > 0 ? 'confirmImage' : 'addImage',
+      count: visual.images - visual.own,
+    },
+  ];
+}

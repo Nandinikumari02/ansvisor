@@ -146,9 +146,17 @@ export function authorProfile(author: ContentAuthor | null): { bio: boolean; lin
 export function eeat({
   author,
   used = null,
+  visual = null,
   confirmed = null,
 }: {
   author: ContentAuthor | null;
+  /**
+   * Phase 2 (CE-049): the page's images, how many of them the person
+   * confirmed are their own (not stock), and the visual proof spots still
+   * open. Own ones are visual proof; images or spots with none confirmed
+   * count none; a page with neither leaves the check out. Left out before.
+   */
+  visual?: { images: number; own: number; openSpots: number } | null;
   /**
    * With no author picked, what the person confirmed of the one their site
    * names (00271): a real person (the byline's points), and their profile
@@ -174,6 +182,16 @@ export function eeat({
             id: 'originalData' as const,
             points: used.data ? EEAT_WEIGHTS.originalData : 0,
             max: EEAT_WEIGHTS.originalData,
+          },
+        ]
+      : []),
+    // Own images are among the page's: images or open spots bring the check in.
+    ...(visual && (visual.images > 0 || visual.openSpots > 0)
+      ? [
+          {
+            id: 'visualProof' as const,
+            points: visual.own > 0 ? EEAT_WEIGHTS.visualProof : 0,
+            max: EEAT_WEIGHTS.visualProof,
           },
         ]
       : []),

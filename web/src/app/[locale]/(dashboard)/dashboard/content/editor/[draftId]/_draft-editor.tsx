@@ -43,6 +43,8 @@ import {
   setContentDraftAuthor,
   confirmDraftAuthor,
   keepDraftSource,
+  confirmOwnImage,
+  getOwnImages,
   setContentDraftPageType,
   startAgentWriting,
   startPageRewrite,
@@ -109,7 +111,7 @@ import {
 import { proofKey, qualityTodos } from '@/lib/content/quality-todos';
 import { readability, sentencesOf } from '@/lib/content/readability';
 import { brandFactsPath, factMismatches } from '@/lib/content/brand-facts';
-import { MAX_PROOF_TODOS, proofsOnPage, type ProofSpot } from '@/lib/content/page-read';
+import { MAX_PROOF_TODOS, pageImages, proofsOnPage, type ProofSpot } from '@/lib/content/page-read';
 import {
   liveSkips,
   nextStep,
@@ -161,7 +163,8 @@ import { PageInfoStrip, pageInfoKey } from './_page-info';
 import { WeakSourcesMarks, weakSourcesKey } from './_weak-sources';
 import { ClaimMarksExtension, claimMarksKey, textRanges, writingBlock } from './_claim-marks';
 import { ProofImageDialog } from './_proof-image-dialog';
-import { ProofSpotsExtension, proofSpotsKey } from './_proof-spots';
+import { ProofSpotsExtension, openSpotPlaces, proofSpotsKey } from './_proof-spots';
+import { ConfirmImagesDialog } from './_confirm-images-dialog';
 import { useClaims } from './_use-claims';
 import { useBrandFacts } from './_use-brand-facts';
 import { usePageRead } from './_use-page-read';
@@ -577,9 +580,6 @@ export function DraftEditor({
     () => (inputs ? inputsUsed(pageBlocks.map((b) => b.text).join('\n'), inputs) : null),
     [inputs, pageBlocks],
   );
-  // E-E-A-T from the author (and, in phase 2, the person's experience and
-  // data), Trust from the page's figures and links (their reads from the
-  // API): with Readability, the scores and the header chip's average (CE-039).
   // With no author picked, the person's own word for the one their site
   // names (00271): ticked here, saved behind, put back if the save fails.
   const [authorConfirmed, setAuthorConfirmed] = useState(draft.authorConfirmed);
@@ -601,13 +601,7 @@ export function DraftEditor({
       })
       .finally(() => setConfirming(false));
   };
-  const eeatScore = useMemo(
-    () =>
-      qualityOn && authorsRead && !inputsPending
-        ? eeat({ author: pageAuthor, used, confirmed: authorConfirmed })
-        : null,
-    [qualityOn, authorsRead, inputsPending, pageAuthor, used, authorConfirmed],
-  );
+  // Trust from the page's figures and links (their reads from the API).
   const { checks: linkChecks, pending: linksPending } = useLinkChecks(
     draft.id,
     autosave.savedAt,
@@ -701,6 +695,77 @@ export function DraftEditor({
     .map(proofKey)
     .filter((key) => !hadProofs.has(key));
   if (newProofs.length > 0) setHadProofs(new Set([...hadProofs, ...newProofs]));
+  // The page's images the person confirmed are their own, not stock (CE-049,
+  // 00270): E-E-A-T's visual proof. Read once; a confirm adds to it at once.
+  const [ownImages, setOwnImages] = useState<ReadonlySet<string> | null>(null);
+  useEffect(() => {
+    if (!sourcesOn) return;
+    let live = true;
+    // A confirm made before the read lands stays. A failed call (the
+    // network, a deploy) counts the confirms made so far: E-E-A-T still scores.
+    void getOwnImages(draft.id)
+      .then((srcs) => live && setOwnImages((prev) => new Set([...srcs, ...(prev ?? [])])))
+      .catch((err) => {
+        console.error('Failed to read the own images:', err);
+        if (live) setOwnImages((prev) => prev ?? new Set());
+      });
+    return () => {
+      live = false;
+    };
+  }, [draft.id, sourcesOn]);
+  const images = useMemo(() => (sourcesOn ? pageImages(pageHtml) : []), [sourcesOn, pageHtml]);
+  // The visual proof spots still open, as the margin shows them.
+  const openSpots =
+    editor && pageRead.read ? openSpotPlaces(editor.state.doc, pageRead.read.spots).length : 0;
+  const visualImages = images.length;
+  const visualOwn = ownImages ? images.filter((image) => ownImages.has(image.src)).length : 0;
+  // Once the page's read and the confirmations are in.
+  const visualRead = sourcesOn && pageRead.settled && ownImages !== null;
+  const visual = useMemo(
+    () => (visualRead ? { images: visualImages, own: visualOwn, openSpots } : null),
+    [visualRead, visualImages, visualOwn, openSpots],
+  );
+  // E-E-A-T from the author (and, in phase 2, the person's experience and
+  // data, and their own images); with Trust and Readability, the scores and
+  // the header chip's average (CE-039).
+  // In phase 2 it waits for the visual proof too, so it doesn't move once that lands.
+  const eeatScore = useMemo(
+    () =>
+      qualityOn && authorsRead && !inputsPending && (!sourcesOn || visualRead)
+        ? eeat({ author: pageAuthor, used, visual, confirmed: authorConfirmed })
+        : null,
+    [
+      qualityOn,
+      authorsRead,
+      inputsPending,
+      sourcesOn,
+      visualRead,
+      pageAuthor,
+      used,
+      visual,
+      authorConfirmed,
+    ],
+  );
+  // Confirm: only the person can tell their own image from stock.
+  const [confirmingImages, setConfirmingImages] = useState(false);
+  const confirmImage = async (src: string) => {
+    // Already confirmed: nothing to take back if the save fails.
+    const had = ownImages?.has(src) ?? false;
+    setOwnImages((prev) => new Set([...(prev ?? []), src]));
+    const takeBack = () => {
+      if (!had) setOwnImages((prev) => new Set([...(prev ?? [])].filter((own) => own !== src)));
+    };
+    try {
+      if ((await confirmOwnImage(draft.id, src)) === 'full') {
+        takeBack();
+        toast.error(t('quality.confirmImageFull'));
+      }
+    } catch (err) {
+      console.error('Failed to confirm the image:', err);
+      takeBack();
+      toast.error(t('quality.confirmImageFailed'));
+    }
+  };
   // Out of the editor (to Quality, to Before you publish): the block left
   // for later is read too.
   useEffect(() => {
@@ -870,6 +935,7 @@ export function DraftEditor({
         trust: trustScore,
         brandFacts: brandFacts ? { pending: pendingFacts, had: hadPendingFacts } : null,
         proofs: sourcesOn ? { asks: proofAsks, had: hadProofs } : null,
+        visual,
         confirmed: authorConfirmed,
       })
     : [];
@@ -930,6 +996,8 @@ export function DraftEditor({
     // against, and the page's read (its proof to-dos; what it finds scores).
     !(sourcesOn && factsState.status === 'loading') &&
     !pageRead.reading &&
+    // E-E-A-T's visual proof: the page's read and the own images (CE-049).
+    (!sourcesOn || visualRead) &&
     // Phase 2 reads the page as saved: an edit's score waits for its save.
     !(sourcesOn && saving);
   const [shownQuality, setShownQuality] = useState<{ score: number | null } | null>(null);
@@ -1668,6 +1736,12 @@ export function DraftEditor({
   // The page read's visual proof spots (CE-049), in the draft's margin: not
   // while the agent changes the page. Add image opens their dialog.
   const [spotFor, setSpotFor] = useState<ProofSpot | null>(null);
+  // Quality's Add image (CE-049, part d): the first spot still open.
+  const addImage = () => {
+    if (!editor || !pageRead.read) return;
+    const [first] = openSpotPlaces(editor.state.doc, pageRead.read.spots);
+    if (first) setSpotFor(first.spot);
+  };
   const spotList = sourcesOn && !agentBusy ? (pageRead.read?.spots ?? null) : null;
   useEffect(() => {
     if (!editor || editor.isDestroyed) return;
@@ -2822,6 +2896,8 @@ export function DraftEditor({
                 onPickAuthor={() => setAuthorMenuOpen(true)}
                 onAddInput={addInput}
                 onAddSource={sourcesOn ? addSource : undefined}
+                onConfirmImages={() => setConfirmingImages(true)}
+                onAddImage={addImage}
                 onLater={nudge.later}
                 onAct={nudge.close}
               />
@@ -2865,6 +2941,8 @@ export function DraftEditor({
             onKeepSource={sourcesOn ? (url) => void keepSource(url) : undefined}
             onAddSource={sourcesOn ? addSource : undefined}
             onRemoveClaim={sourcesOn ? removeClaim : undefined}
+            onConfirmImages={() => setConfirmingImages(true)}
+            onAddImage={addImage}
           />
         ) : (
           <EditorPanelRail onOpen={openPanelTab} />
@@ -2872,7 +2950,20 @@ export function DraftEditor({
       </div>
 
       {editor && spotFor && (
-        <ProofImageDialog editor={editor} spot={spotFor} onClose={() => setSpotFor(null)} />
+        <ProofImageDialog
+          editor={editor}
+          spot={spotFor}
+          onClose={() => setSpotFor(null)}
+          onOwn={(src) => void confirmImage(src)}
+        />
+      )}
+      {confirmingImages && ownImages && (
+        <ConfirmImagesDialog
+          images={images}
+          own={ownImages}
+          onConfirm={(src) => void confirmImage(src)}
+          onClose={() => setConfirmingImages(false)}
+        />
       )}
       {quality && exportOpen && exportChecks && (
         <ExportDialog
