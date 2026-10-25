@@ -92,6 +92,7 @@ import { PLACEHOLDER, pagePlaceholders, placeholderIn } from '@/lib/content/plac
 import {
   blankCode,
   bylineText,
+  disclosureText,
   exportPlaceholders,
   pasteChecks,
   teamName,
@@ -104,13 +105,14 @@ import { inputsGiven, inputsUsed } from '@/lib/content/draft-inputs';
 import {
   eeat,
   linksToCheck,
+  squeeze,
   trust,
   trustBlocks,
   unplacedSites,
   type ClaimMark,
 } from '@/lib/content/quality-checks';
 import { proofKey, qualityTodos } from '@/lib/content/quality-todos';
-import { readability, sentencesOf } from '@/lib/content/readability';
+import { isByline, readability, sentencesOf } from '@/lib/content/readability';
 import { brandFactsPath, factMismatches } from '@/lib/content/brand-facts';
 import {
   MAX_PROOF_TODOS,
@@ -708,25 +710,32 @@ export function DraftEditor({
   // An edit holds what was found until the page as it is is read: while it
   // waits for its save too, not only once the ask is out.
   const pageChanging = pageRead.reading || saving;
-  const aiChecks = useMemo(
-    () =>
+  // The disclosure line Add line puts in (CE-050) is the disclosure while
+  // the page has it: Trust, Quality and Export count it before it is read.
+  const aiChecks = useMemo(() => {
+    const checks =
       sourcesOn &&
       pageRead.read?.checks &&
       pageRead.read.checks.pageType === (pageType ?? null) &&
       !pageRead.paused &&
       !pageRead.limited
         ? aiChecksOnPage(pageBlocks, pageRead.read.checks, pageType, pageChanging)
-        : null,
-    [
-      sourcesOn,
-      pageRead.read,
-      pageChanging,
-      pageRead.paused,
-      pageRead.limited,
-      pageBlocks,
-      pageType,
-    ],
-  );
+        : null;
+    const line = checks?.disclosure?.found === false ? disclosureText(language, brandName) : null;
+    return line && squeeze(pageBlocks.map((b) => b.text).join('')).includes(squeeze(line))
+      ? { ...checks!, disclosure: { found: true, show: line, added: true } }
+      : checks;
+  }, [
+    sourcesOn,
+    pageRead.read,
+    pageChanging,
+    pageRead.paused,
+    pageRead.limited,
+    pageBlocks,
+    pageType,
+    language,
+    brandName,
+  ]);
   const readable = useMemo(
     () => (qualityOn ? readability(pageHtml, language, aiChecks?.answerFirst ?? null) : null),
     [qualityOn, pageHtml, language, aiChecks],
@@ -1541,6 +1550,47 @@ export function DraftEditor({
    * said to be there.
    */
   const htmlSourceRef = useRef<HTMLTextAreaElement>(null);
+  // The disclosure line Before you publish offers (CE-050), and whether the
+  // page has it already (added, and not read again yet).
+  const disclosureLine = aiChecks?.disclosure ? disclosureText(language, brandName) : null;
+  const disclosureOnPage =
+    !!disclosureLine &&
+    squeeze(pageBlocks.map((b) => b.text).join('')).includes(squeeze(disclosureLine));
+  // The disclosure line (CE-050) under the page's opening paragraph (the
+  // answer Answer first reads, past an image, a byline or a date), else
+  // under the page's H1, else at the top; never twice. One undo takes it out.
+  const addDisclosure = (line: string) => {
+    if (!editor || editor.isDestroyed) return;
+    const { doc } = editor.state;
+    if (squeeze(doc.textContent).includes(squeeze(line))) return;
+    let at = 0;
+    let index = -1;
+    doc.forEach((node, offset, i) => {
+      const h1 = node.type.name === 'heading' && node.attrs.level === 1;
+      if (index === -1 && h1 && node.textContent.trim()) {
+        index = i + 1;
+        at = offset + node.nodeSize;
+      }
+    });
+    if (index !== -1) {
+      const para = (i: number) =>
+        i < doc.childCount && doc.child(i).type.name === 'paragraph' ? doc.child(i) : null;
+      // Past what has no words (a hero image, an empty paragraph), as
+      // Readability and the page read do, and a byline or a date.
+      const skipped = (i: number) =>
+        i < doc.childCount &&
+        (!doc.child(i).textContent.trim() || (!!para(i) && isByline(doc.child(i).textContent)));
+      let next = index;
+      while (skipped(next)) next += 1;
+      if (para(next)?.textContent.trim()) {
+        for (let i = index; i <= next; i++) at += doc.child(i).nodeSize;
+      }
+    }
+    editor
+      .chain()
+      .insertContentAt(at, { type: 'paragraph', content: [{ type: 'text', text: line }] })
+      .run();
+  };
   const fillFirstPlaceholder = () => {
     if (htmlSource !== null) {
       const m = new RegExp(PLACEHOLDER.source, 'iu').exec(blankCode(htmlSource, { words: true }));
@@ -3086,6 +3136,7 @@ export function DraftEditor({
                 ? quality.trust.score
                 : null,
             noAuthor: quality.eeat !== null && !quality.author && !authorConfirmed.real,
+            noDisclosure: aiChecks?.disclosure?.found === false,
             article: isArticlePage(pageType),
             onReview: () => {
               setExportOpen(null);
@@ -3135,6 +3186,10 @@ export function DraftEditor({
           pageType={pageType}
           image={firstImage(pageHtml)}
           linksPending={linksPending}
+          // Not while the HTML view holds the page: its source is what goes out.
+          disclosureLine={htmlSource === null ? disclosureLine : null}
+          disclosureAdded={disclosureOnPage}
+          onAddDisclosure={addDisclosure}
           onMarkReady={(anyway) => {
             setPublishOpen(null);
             void markReady(anyway ?? undefined);
