@@ -19,6 +19,7 @@ const saveContentDraft = vi.fn();
 const setContentDraftPageType = vi.fn();
 const setContentDraftAuthor = vi.fn();
 const keepDraftSource = vi.fn();
+const confirmDraftAuthor = vi.fn();
 const checkDraftClaims = vi.fn();
 const checkDraftLinks = vi.fn();
 const getSiteTrust = vi.fn();
@@ -85,6 +86,7 @@ vi.mock('@/lib/actions/content-drafts', () => ({
   setContentDraftPageType: (...args: unknown[]) => setContentDraftPageType(...args),
   setContentDraftAuthor: (...args: unknown[]) => setContentDraftAuthor(...args),
   keepDraftSource: (...args: unknown[]) => keepDraftSource(...args),
+  confirmDraftAuthor: (...args: unknown[]) => confirmDraftAuthor(...args),
   checkDraftClaims: (...args: unknown[]) => checkDraftClaims(...args),
   checkDraftLinks: (...args: unknown[]) => checkDraftLinks(...args),
 }));
@@ -209,6 +211,7 @@ const draft = (over: Partial<ContentDraft> = {}): ContentDraft => ({
   authorId: null,
   rules: { set: null, source: null, overrides: {}, textRules: [] },
   keptSources: [],
+  authorConfirmed: { real: false, profile: false },
   action: null,
   agentState: null,
   agentSince: null,
@@ -284,6 +287,7 @@ beforeEach(() => {
   setContentDraftPageType.mockReset().mockResolvedValue(undefined);
   setContentDraftAuthor.mockReset().mockResolvedValue(undefined);
   keepDraftSource.mockReset();
+  confirmDraftAuthor.mockReset().mockResolvedValue(undefined);
   checkDraftClaims.mockReset().mockResolvedValue({ blocks: [], pending: 0, limited: false });
   checkDraftLinks.mockReset().mockResolvedValue({ links: [], skipped: [] });
   getSiteTrust.mockReset().mockRejectedValue(new Error('not in this test'));
@@ -2476,6 +2480,57 @@ describe('the side panel', () => {
       ).not.toContainEqual(expect.stringContaining('Quality'));
     });
 
+    it('saves the author the site names as confirmed, and puts it back when the save fails (00271)', async () => {
+      process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '1';
+      getContentAuthors.mockResolvedValue({
+        authors: [],
+        brands: [{ id: 'b1', name: 'Acme' }],
+        me: { id: 'u1', role: 'admin' },
+      });
+      getContentDraft.mockResolvedValue(readable);
+      window.innerWidth = 1440;
+      await renderPage();
+      const chip = [...container.querySelectorAll<HTMLButtonElement>('header button')].find((b) =>
+        b.textContent?.startsWith('Quality'),
+      )!;
+      await act(async () => chip.click());
+      const box = () => panel()!.querySelector<HTMLButtonElement>('[role="checkbox"]')!;
+      expect(box().getAttribute('aria-checked')).toBe('false');
+      await act(async () => box().click());
+      expect(confirmDraftAuthor).toHaveBeenCalledWith(readable.id, 'real', true);
+      expect(box().getAttribute('aria-checked')).toBe('true');
+      expect(panel()!.textContent).toContain('E-E-A-T60');
+
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        confirmDraftAuthor.mockRejectedValueOnce(new Error('offline'));
+        await act(async () => box().click());
+        expect(toast.error).toHaveBeenCalledWith("Couldn't save that. Try again.");
+        expect(box().getAttribute('aria-checked')).toBe('true');
+
+        // Unticking the author unticks the profile too: a failed save puts both back.
+        const profile = () => panel()!.querySelectorAll<HTMLButtonElement>('[role="checkbox"]')[1]!;
+        await act(async () => profile().click());
+        expect(profile().getAttribute('aria-checked')).toBe('true');
+        confirmDraftAuthor.mockRejectedValueOnce(new Error('offline'));
+        await act(async () => box().click());
+        expect(box().getAttribute('aria-checked')).toBe('true');
+        expect(profile().getAttribute('aria-checked')).toBe('true');
+
+        // One save at a time: the boxes wait for it.
+        let saved!: () => void;
+        confirmDraftAuthor.mockReturnValueOnce(new Promise<void>((resolve) => (saved = resolve)));
+        await act(async () => profile().click());
+        expect(profile().getAttribute('aria-checked')).toBe('false');
+        expect(box().disabled).toBe(true);
+        expect(profile().disabled).toBe(true);
+        await act(async () => saved());
+        expect(profile().disabled).toBe(false);
+      } finally {
+        vi.mocked(console.error).mockRestore();
+      }
+    });
+
     it('scores the page as written, in the header and Instructions › Quality', async () => {
       process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '1';
       getContentDraft.mockResolvedValue(readable);
@@ -3601,6 +3656,26 @@ describe('the side panel', () => {
       }
     });
 
+    it('sends no author for one the site names, nor the team’s byline line (00271)', async () => {
+      process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '1';
+      getContentAuthors.mockResolvedValue({
+        authors: [],
+        brands: [{ id: 'b1', name: 'Acme', bylineInContent: true }],
+        me: { id: 'u1', role: 'admin' },
+      });
+      getContentDraft.mockResolvedValue(
+        draft({ pageType: 'blog_post', authorConfirmed: { real: true, profile: false } }),
+      );
+      await renderPage();
+      await act(async () => button('Send to CMS')!.click());
+      await act(async () => inDialog('Continue to send').click());
+      await act(async () => inDialog('Send').click());
+      // The CMS keeps its own author.
+      expect(sendPagesToCms).toHaveBeenCalledWith('b1', [
+        expect.objectContaining({ draftId: 'd1', author: null, html: '<p>Teams trust it.</p>' }),
+      ]);
+    });
+
     it('opens Before you publish first while Quality is on', async () => {
       process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '1';
       getContentDraft.mockResolvedValue(draft({ pageType: 'blog_post' }));
@@ -3748,6 +3823,17 @@ describe('the side panel', () => {
       expect(dialog()!.textContent).toContain('Meta titlePipeline forecasting');
       expect(dialog()!.textContent).toContain('AuthorAcme Team → your CMS author field');
       expect(inDialog('Download Word').disabled).toBe(false);
+    });
+
+    it('leaves the author to the CMS for one the site names, with no warning (00271)', async () => {
+      getContentDraft.mockResolvedValue(
+        draft({ pageType: 'blog_post', authorConfirmed: { real: true, profile: false } }),
+      );
+      await renderPage();
+      await act(async () => button('Export')!.click());
+      expect(dialog()!.textContent).toContain('Content · ready to paste');
+      expect(dialog()!.textContent).not.toContain('no author yet');
+      expect(dialog()!.textContent).toContain("AuthorYour site's own: your CMS keeps it");
     });
 
     it('names the team in the page’s language in the CMS author field', async () => {

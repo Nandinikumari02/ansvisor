@@ -41,6 +41,7 @@ import {
   unmarkContentDraftReady,
   restoreDraftVersion,
   setContentDraftAuthor,
+  confirmDraftAuthor,
   keepDraftSource,
   setContentDraftPageType,
   startAgentWriting,
@@ -571,9 +572,33 @@ export function DraftEditor({
   // E-E-A-T from the author (and, in phase 2, the person's experience and
   // data), Trust from the page's figures and links (their reads from the
   // API): with Readability, the scores and the header chip's average (CE-039).
+  // With no author picked, the person's own word for the one their site
+  // names (00271): ticked here, saved behind, put back if the save fails.
+  const [authorConfirmed, setAuthorConfirmed] = useState(draft.authorConfirmed);
+  // One save at a time (the boxes wait): a failed one puts back the pair as saved.
+  const [confirming, setConfirming] = useState(false);
+  const confirmAuthor = (what: 'real' | 'profile', on: boolean) => {
+    if (confirming) return;
+    const before = authorConfirmed;
+    // Unticking the author unticks their profile too, as the database does.
+    setAuthorConfirmed(
+      what === 'real' && !on ? { real: false, profile: false } : { ...before, [what]: on },
+    );
+    setConfirming(true);
+    confirmDraftAuthor(draft.id, what, on)
+      .catch((err) => {
+        console.error('Failed to save the author confirmation:', err);
+        setAuthorConfirmed(before);
+        toast.error(t('quality.confirmFailed'));
+      })
+      .finally(() => setConfirming(false));
+  };
   const eeatScore = useMemo(
-    () => (qualityOn && authorsRead && !inputsPending ? eeat({ author: pageAuthor, used }) : null),
-    [qualityOn, authorsRead, inputsPending, pageAuthor, used],
+    () =>
+      qualityOn && authorsRead && !inputsPending
+        ? eeat({ author: pageAuthor, used, confirmed: authorConfirmed })
+        : null,
+    [qualityOn, authorsRead, inputsPending, pageAuthor, used, authorConfirmed],
   );
   const { checks: linkChecks, pending: linksPending } = useLinkChecks(
     draft.id,
@@ -793,6 +818,7 @@ export function DraftEditor({
         used,
         given: inputs ? inputsGiven(inputs) : null,
         trust: trustScore,
+        confirmed: authorConfirmed,
       })
     : [];
   const quality: QualityRead | null = qualityOn
@@ -812,6 +838,8 @@ export function DraftEditor({
         claimsPaused: claimsRead.paused,
         claimsLimited: claimsRead.limited,
         claimsReading: claimsRead.reading,
+        authorConfirmed,
+        authorConfirming: confirming,
       }
     : null;
   // Quality's Pick author opens the header's menu.
@@ -1674,10 +1702,17 @@ export function DraftEditor({
   // The byline line a brand with Add byline to content puts under the H1,
   // in the page's language (its Language rule, else the brand's), as
   // Readability reads it: the language the writer writes the page in.
+  // An author the person confirmed their site names (00271) isn't the team:
+  // no "By {Brand} Team" line goes in for them.
   const contentByline =
-    bylineInContent && authorsRead
+    bylineInContent && authorsRead && (pageAuthor || !authorConfirmed.real)
       ? bylineText(language, pageAuthor?.name ?? null, brandName)
       : null;
+  // The team for the CMS's author field (Export, Send to CMS), in the page's
+  // language; until the authors are read, who it is by isn't known. Not for
+  // an author the person confirmed their site names: the CMS keeps its own.
+  const teamByline =
+    authorsRead && (pageAuthor || !authorConfirmed.real) ? teamName(language, brandName) : '';
   // Export (CE-057), once Quality is live: where it goes, its checks and fields.
   // The page as it was when Export opened: what it shows stays still while open.
   const [exportOpen, setExportOpen] = useState<{
@@ -2731,6 +2766,7 @@ export function DraftEditor({
             onPickAuthor={() => setAuthorMenuOpen(true)}
             yourInput={inputsRead.status === 'off' ? null : inputsRead}
             onAddInput={addInput}
+            onConfirmAuthor={confirmAuthor}
             onKeepSource={sourcesOn ? (url) => void keepSource(url) : undefined}
             onAddSource={sourcesOn ? addSource : undefined}
             onRemoveClaim={sourcesOn ? removeClaim : undefined}
@@ -2748,9 +2784,8 @@ export function DraftEditor({
           isNew={draft.method === 'create'}
           sourceUrl={draft.sourceUrl}
           author={pageAuthor}
-          // Until the authors are read, who it is by isn't known. It goes to
-          // the CMS's author field, so in the page's language.
-          teamByline={authorsRead ? teamName(language, brandName) : ''}
+          teamByline={teamByline}
+          siteAuthor={!pageAuthor && authorConfirmed.real}
           byline={contentByline}
           checks={exportChecks}
           linksPending={linksPending}
@@ -2766,7 +2801,7 @@ export function DraftEditor({
               quality.trust?.score != null && quality.trust.score < TRUST_GATE
                 ? quality.trust.score
                 : null,
-            noAuthor: quality.eeat !== null && !quality.author,
+            noAuthor: quality.eeat !== null && !quality.author && !authorConfirmed.real,
             article: isArticlePage(pageType),
             onReview: () => {
               setExportOpen(null);
@@ -2784,9 +2819,7 @@ export function DraftEditor({
           html={sendOpen.html}
           sourceUrl={draft.sourceUrl}
           author={pageAuthor}
-          // Until the authors are read, who it is by isn't known. It goes to
-          // the CMS's author field, so in the page's language, as Export's.
-          teamByline={authorsRead ? teamName(language, brandName) : ''}
+          teamByline={teamByline}
           byline={contentByline}
           onFillNow={() => {
             setSendOpen(null);
