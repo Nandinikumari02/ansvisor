@@ -104,6 +104,7 @@ async function render(
     title = 'How small teams forecast',
     disclosureLine = null as string | null,
     disclosureAdded = false,
+    product = null as Parameters<typeof BeforePublish>[0]['product'],
   } = {},
 ) {
   await act(async () => {
@@ -122,6 +123,7 @@ async function render(
           pageType={pageType}
           image={image}
           linksPending={linksPending}
+          product={product}
           onMarkReady={onMarkReady}
           onFixFirst={onFixFirst}
           disclosureLine={disclosureLine}
@@ -327,6 +329,61 @@ describe('BeforePublish', () => {
       }),
     );
     expect(rows().some((row) => row.includes('without a disclosure'))).toBe(false);
+  });
+
+  it('gives a product page its Product schema with the price it states, and asks for one it doesn’t (CE-053)', async () => {
+    const product = {
+      description: 'A daypack for wet hikes.',
+      images: ['https://cdn.acme.com/ridge.jpg'],
+      offer: { price: 129, currency: 'USD' },
+    };
+    await render(quality(), { pageType: 'product_page', title: 'Ridge 28 daypack', product });
+    // The price as read, for the person to check.
+    expect(rows().find((row) => row.startsWith('Product schema with its price'))).toContain(
+      "Price read from the page: $129. Check it's the product's.",
+    );
+    expect(jsonLd()).toMatchObject({
+      '@type': 'Product',
+      name: 'Ridge 28 daypack',
+      offers: { '@type': 'Offer', price: '129.00', priceCurrency: 'USD' },
+    });
+    expect(dialog().textContent).toContain('The price, its currency and the images are the page');
+    // No name or no price: no code to paste, and it says why.
+    await render(quality(), {
+      pageType: 'product_page',
+      title: '[name of a real person] daypack',
+      product,
+    });
+    expect(rows().some((row) => row.startsWith("Product schema needs the product's name"))).toBe(
+      true,
+    );
+    expect(rows().some((row) => row.startsWith('Product schema needs the price'))).toBe(false);
+    expect(dialog().querySelector('pre')).toBeNull();
+    await render(quality(), {
+      pageType: 'product_page',
+      title: 'Ridge 28 daypack',
+      product: { ...product, offer: null },
+    });
+    expect(rows().some((row) => row.startsWith('Product schema needs the price'))).toBe(true);
+    // Prices that differ: the code doesn't guess which is the product's.
+    await render(quality(), {
+      pageType: 'product_page',
+      title: 'Ridge 28 daypack',
+      product: { ...product, offer: { several: ['$119', '$139'] } },
+    });
+    expect(rows().find((row) => row.startsWith('Product schema needs one price'))).toContain(
+      'more than one price ($119, $139)',
+    );
+    expect(dialog().querySelector('pre')).toBeNull();
+    await render(quality(), {
+      pageType: 'product_page',
+      title: 'Ridge 28 daypack',
+      product: { ...product, offer: null },
+    });
+    expect(dialog().querySelector('pre')).toBeNull();
+    expect(
+      [...dialog().querySelectorAll('button')].some((b) => b.textContent === 'Copy JSON-LD'),
+    ).toBe(false);
   });
 
   it('names the brand’s byline as checked on a page type that wants no author (CE-052)', async () => {

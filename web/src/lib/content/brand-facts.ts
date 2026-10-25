@@ -132,11 +132,17 @@ const MARK = `(?:${CURRENCY_MARKS.map(([m]) => escape(m)).join('|')})`;
 const CODE = `(?<![\\p{L}])(?:${ISO.join('|')}|TL)(?![\\p{L}])`;
 /** Thousands by a comma or a point, or by a space when the currency comes after ("1 299 €"). */
 const amount = (groups: string) =>
-  String.raw`(?<![\d.,])(?:\d{1,3}(?:${groups}\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?![\d]|[.,]\d)`;
+  String.raw`(?<![\d.,'’])(?:\d{1,3}(?:${groups}\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?![\d]|[.,'’]\d)`;
+/** A currency after an amount, not one written onto the next ("Ridge 28 $129": $129, not 28 $). */
 const PRICE = new RegExp(
-  `(?<before>${MARK}|${CODE})\\s?(?<a>${amount('[.,]')})|(?<b>${amount('[.,\\s]')})\\s?(?<after>${MARK}|${CODE}|zł)`,
+  `(?<before>${MARK}|${CODE})\\s?(?<a>${amount("[.,'’]")})|(?<b>${amount("[.,'’\\s]")})\\s?(?<after>${MARK}|${CODE}|zł)(?!\\d)`,
   'gu',
 );
+/** "$129.00 CAD": the code after a sign says whose dollar it is. */
+const CODE_AFTER = new RegExp(`^\\s?(?<code>${ISO.join('|')})(?![\\p{L}])`, 'u');
+/** "CAD $129", "MX$1,299": a code before a dollar sign says whose too. */
+const CODE_BEFORE = /(?<!\p{L})(USD|CAD|AUD|NZD|SGD|HKD|MXN|MX|HK)\s?$/u;
+const DOLLAR_OF: Record<string, string> = { MX: 'MXN', HK: 'HKD' };
 const MAGNITUDE =
   /^\s*(?:[kmb](?!\p{L})|bn\b|mn\b|thousand|million|billion|milyon|milyar|mio\b|mrd\b)/iu;
 /** "$10–$20", "between $10 and $20": a range, its two ends (a number before the word or dash). */
@@ -159,9 +165,10 @@ const BILLED_YEAR =
   /billed\s+(?:annually|yearly)|(?:annual|yearly)\s+(?:billing|plan)|paid\s+(?:annually|yearly)|yıllık\s+ödeme|jährliche\s+zahlung/iu;
 const BILLED_MONTH =
   /billed\s+monthly|monthly\s+billing|paid\s+monthly|aylık\s+ödeme|monatliche\s+zahlung/iu;
-const FROM = /\b(?:from|start(?:s|ing)?\s+(?:at|from)|ab|à\s+partir\s+de|desde)\s*$/iu;
-/** "₺499'dan başlayan": Turkish says it after the price. */
-const FROM_AFTER = /^['’]?(?:den|dan|ten|tan)\s+(?:başlayan|itibaren)/iu;
+const FROM =
+  /\b(?:from|start(?:s|ing)?\s+(?:at|from)|as\s+low\s+as|(?:begins?|starts?)\s+at|ab|[àa]\s+partire?\s+d[ae]|desde|vanaf)(?:\s+(?:just|only|nur|seulement|solo|slechts))?\s*$/iu;
+/** "₺499'dan başlayan", "1.299 TL'den başlıyor": Turkish says it after the price. */
+const FROM_AFTER = /^['’]?(?:den|dan|ten|tan)\s+(?:başlayan|başlıyor|itibaren)/iu;
 
 const currencyOf = (mark: string) =>
   mark === 'TL'
@@ -172,7 +179,12 @@ const currencyOf = (mark: string) =>
 
 /** An amount as written: a separator before exactly three digits groups thousands. */
 const amountOf = (token: string) => {
-  const value = Number(token.replace(/[.,\s](?=\d{3}(?!\d))/g, '').replace(',', '.'));
+  const value = Number(
+    token
+      .replace(/['’]/g, '')
+      .replace(/[.,\s](?=\d{3}(?!\d))/g, '')
+      .replace(',', '.'),
+  );
   return Number.isFinite(value) ? value : null;
 };
 
@@ -184,13 +196,21 @@ export interface PagePrice {
   period: 'month' | 'year' | null;
   from: boolean;
   at: number;
+  /**
+   * Its digits or its sign may be another number's: a space between digits
+   * ("PlayStation 5 549,99 €" reads 5 549,99), or a sign after a whole
+   * amount with a number next ("Ridge 28 € 129").
+   */
+  loose: boolean;
 }
 
 /**
  * The prices a sentence gives, the way the API reads a brand's: a scale
- * ("$2M"), a range ("$10–$20") and "$10 off" are none.
+ * ("$2M"), a range ("$10–$20") and "$10 off" are none. With `rangeEnds`, a
+ * range's ends are read too, for a reader that takes its ranges apart
+ * (priceRanges): "Ridge 28 – $129" is a price after all.
  */
-export function pagePrices(sentence: string): PagePrice[] {
+export function pagePrices(sentence: string, { rangeEnds = false } = {}): PagePrice[] {
   const out: PagePrice[] = [];
   for (const m of sentence.matchAll(PRICE)) {
     const g = m.groups!;
@@ -198,18 +218,79 @@ export function pagePrices(sentence: string): PagePrice[] {
     const before = sentence.slice(Math.max(0, m.index - 24), m.index);
     const after = sentence.slice(end, end + 40);
     if (MAGNITUDE.test(after) || /^\s*off(?!\p{L})/iu.test(after)) continue;
-    if (RANGE_AFTER.test(after) || RANGE_BEFORE.test(before)) continue;
-    const currency = currencyOf(g.before ?? g.after);
+    if (!rangeEnds && (RANGE_AFTER.test(after) || RANGE_BEFORE.test(before))) continue;
+    const code = g.before && !ISO.includes(g.before) ? CODE_AFTER.exec(after) : null;
+    const codeBefore = g.before === '$' ? CODE_BEFORE.exec(before) : null;
+    const dollar = codeBefore && (DOLLAR_OF[codeBefore[1]] ?? codeBefore[1]);
+    const currency = code ? code.groups!.code : (dollar ?? currencyOf(g.before ?? g.after));
     const value = amountOf(g.a ?? g.b);
     if (!currency || value === null) continue;
     out.push({
-      text: m[0].trim(),
+      text: code ? `${m[0].trim()}${code[0]}` : m[0].trim(),
       amount: value,
       currency,
       period: MONTH.test(after) ? 'month' : YEAR.test(after) ? 'year' : null,
       from: FROM.test(before) || FROM_AFTER.test(after),
       at: m.index,
+      // Cents tie a sign to its amount: "129,00 € 2 Jahre Garantie" is 129 €.
+      loose:
+        /\s/u.test(g.b ?? '') ||
+        (!!g.after && /^\s\d/u.test(after) && !/[.,]\d{1,2}$/u.test(g.b ?? '')),
     });
+  }
+  return out;
+}
+
+/** A range's end: an amount with its currency before or after it, or neither ("$119–139"). */
+const rangeEnd = (name: string) =>
+  `(?:(?<${name}Before>${MARK}|${CODE})\\s?)?(?<${name}>${amount("[.,'’]")})(?:\\s?(?<${name}After>${MARK}|${CODE}|zł)(?!\\d))?`;
+const PRICE_RANGE = new RegExp(
+  `${rangeEnd('low')}(?<join>\\s?(?:[–—-]|(?<=\\s)(?:to|bis|à|a|ila|ile|and|und|et|y)(?=\\s))\\s?)${rangeEnd('high')}`,
+  'giu',
+);
+
+/** A range a sentence gives ("$119–$139", "119–139 €", "€20 to €30"): its two ends, in one currency. */
+export interface PriceRange {
+  text: string;
+  low: number;
+  high: number;
+  currency: string;
+  at: number;
+  /**
+   * Written as ranges are: both ends with their currency, or one and a
+   * dash with no space ("$119–139"). Else ("$119 – 139", "119 bis 139 €")
+   * it may be one, or a price beside a number.
+   */
+  sure: boolean;
+}
+
+/**
+ * The price ranges a sentence gives (the ones pagePrices leaves out): the
+ * same currency on both ends, the low end first, and whether it's sure
+ * (PriceRange). A number before a price ("Ridge 28 – $129") or one after
+ * it with a word ("$129 – 150 reviews", "$19 - 100% cotton", "$25-30-day
+ * returns") is no range.
+ */
+export function priceRanges(sentence: string): PriceRange[] {
+  const out: PriceRange[] = [];
+  for (const m of sentence.matchAll(PRICE_RANGE)) {
+    const g = m.groups!;
+    const marks = [g.lowBefore, g.lowAfter, g.highBefore, g.highAfter].filter(Boolean);
+    const currencies = new Set(marks.map((mark) => currencyOf(mark)));
+    const low = amountOf(g.low);
+    const high = amountOf(g.high);
+    const after = sentence.slice(m.index + m[0].length, m.index + m[0].length + 40);
+    const lowMarked = !!(g.lowBefore || g.lowAfter);
+    const highMarked = !!(g.highBefore || g.highAfter);
+    if (currencies.size !== 1 || currencies.has(null) || MAGNITUDE.test(after)) continue;
+    if (low === null || high === null || !(low < high)) continue;
+    if (!lowMarked && g.highBefore) continue;
+    // "$19 - 100% cotton", "$25-30-day returns", "€20 – 30 Tage Rückgaberecht".
+    if (!highMarked && /^(?:%|-\p{L})/u.test(after)) continue;
+    if (!highMarked && /\s/u.test(g.join) && /^\s+\p{L}/u.test(after)) continue;
+    const sure =
+      (lowMarked && highMarked) || (/^[–—-]$/u.test(g.join) && !/^(?:%|-?\p{L})/u.test(after));
+    out.push({ text: m[0], low, high, currency: [...currencies][0]!, at: m.index, sure });
   }
   return out;
 }

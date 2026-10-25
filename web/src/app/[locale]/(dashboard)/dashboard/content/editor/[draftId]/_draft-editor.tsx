@@ -91,7 +91,13 @@ import {
 } from '@/lib/content/clean-html';
 import { PAGE_READ_DELAY_MS, draftTitleFromDoc, safeLinkHref } from '@/lib/content/editor';
 import { JsonLd } from '@/lib/content/json-ld-node';
-import { firstImage, isArticlePage } from '@/lib/content/page-schema';
+import {
+  firstImage,
+  isArticlePage,
+  openingParagraph,
+  pageName,
+  pageOffer,
+} from '@/lib/content/page-schema';
 import { PLACEHOLDER, pagePlaceholders, placeholderIn } from '@/lib/content/placeholders';
 import { HANDOFF_KEYS, handOffItems } from '@/lib/content/hand-off';
 import {
@@ -951,6 +957,21 @@ export function DraftEditor({
   // asks for a qualified reviewer, one of Authors.
   const regulated = sourcesOn ? (pageRead.read?.regulated ?? null) : null;
   const pageReviewer = authorsRead?.authors.find((a) => a.id === reviewerId) ?? null;
+  // Phase 3 (CE-053): a product page's Product schema in Before you publish,
+  // from its opening paragraph, its own images (else its first) and the
+  // price it states.
+  const productSchema = useMemo(() => {
+    if (profile !== 'product') return null;
+    const own = images
+      .filter((image) => ownImages?.has(image.src) && /^https:\/\//i.test(image.src))
+      .map((image) => image.src);
+    const first = firstImage(pageHtml);
+    return {
+      description: openingParagraph(pageHtml),
+      images: own.length ? own : first ? [first] : [],
+      offer: pageOffer(pageBlocks.map((block) => block.text)),
+    };
+  }, [profile, images, ownImages, pageHtml, pageBlocks]);
   // Confirm: only the person can tell their own image from stock.
   const [confirmingImages, setConfirmingImages] = useState(false);
   // Quality's Confirm on a customer case (CE-052): the person's statement
@@ -3485,6 +3506,9 @@ export function DraftEditor({
             noDisclosure:
               aiChecks?.disclosure?.found === false && !checksOff(profile).has('disclosure'),
             article: isArticlePage(pageType),
+            // Only where Before you publish has its code: a name and one price.
+            product:
+              !!productSchema?.offer && !('several' in productSchema.offer) && !!pageName(title),
             onReview: () => {
               setExportOpen(null);
               openBeforePublish('export', exportOpen.destination);
@@ -3537,6 +3561,7 @@ export function DraftEditor({
           disclosureLine={htmlSource === null ? disclosureLine : null}
           disclosureAdded={disclosureOnPage}
           onAddDisclosure={addLineUnderAnswer}
+          product={productSchema}
           onMarkReady={(anyway) => {
             setPublishOpen(null);
             void markReady(anyway ?? undefined);

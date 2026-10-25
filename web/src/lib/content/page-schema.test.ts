@@ -6,7 +6,11 @@ import {
   isArticlePage,
   jsonLdScript,
   localDate,
+  pageName,
   titleHasPlaceholder,
+  openingParagraph,
+  pageOffer,
+  productJsonLd,
 } from './page-schema';
 
 /** Before you publish's JSON-LD (Quality spec §7, CE-041): from the page's facts, nothing made up. */
@@ -89,6 +93,9 @@ describe('articleJsonLd', () => {
     expect(result.author).toMatchObject({ name: 'Ada Lovelace' });
     // A footnote, a checkbox or "[sic]" is no placeholder.
     expect(titleHasPlaceholder('Pipeline [1] and [x] [sic]')).toBe(false);
+    expect(pageName(' Ridge 28 [1] ')).toBe('Ridge 28 [1]');
+    expect(pageName('Ridge [model name]')).toBeNull();
+    expect(pageName('  ')).toBeNull();
     expect(titleHasPlaceholder('Interview with [name of a real person]')).toBe(true);
     // The match keeps no state between titles.
     expect(titleHasPlaceholder('Interview with [name of a real person]')).toBe(true);
@@ -135,5 +142,260 @@ describe('isArticlePage', () => {
 describe('localDate', () => {
   it('gives the local day', () => {
     expect(localDate(new Date(2026, 0, 5, 23, 30))).toBe('2026-01-05');
+  });
+});
+
+describe('pageOffer (Phase 3, CE-053)', () => {
+  const ridge = { price: 129, currency: 'USD' };
+
+  it('reads one price as the Offer, a range written as one as low and high', () => {
+    expect(pageOffer(['The Ridge 28 costs $129.'])).toEqual(ridge);
+    expect(pageOffer(['Small: $129.', 'In stock. Small: $129.'])).toEqual(ridge);
+    expect(pageOffer(['Sizes run $119–$139.'])).toEqual({ low: 119, high: 139, currency: 'USD' });
+    expect(pageOffer(['From $119-139, by size.', 'The large is $139.'])).toEqual({
+      low: 119,
+      high: 139,
+      currency: 'USD',
+    });
+    expect(pageOffer(['Zwischen 119 € und 139 €.'])).toEqual({
+      low: 119,
+      high: 139,
+      currency: 'EUR',
+    });
+    // A tax-inclusive price is the price.
+    expect(pageOffer(['129 € inkl. MwSt.'])).toEqual({ price: 129, currency: 'EUR' });
+    expect(pageOffer(['Fiyatı 1.299 TL, KDV dahil.'])).toEqual({ price: 1299, currency: 'TRY' });
+    expect(pageOffer(['$129, tax included.'])).toEqual(ridge);
+    // Words that name the product aren't another bill.
+    expect(pageOffer(['Extra large: $129.'])).toEqual(ridge);
+    expect(pageOffer(['The over-ear Ridge headphones cost $129.'])).toEqual(ridge);
+    expect(pageOffer(['A 2-person tent for $129.'])).toEqual(ridge);
+    expect(pageOffer(['Ridge 28 for $129.'])).toEqual(ridge);
+    expect(pageOffer(['Ridge Plus: $129.'])).toEqual(ridge);
+    expect(pageOffer(['Comes with all accessories for $129.'])).toEqual(ridge);
+    // A model's number before its price is no price, nor a range.
+    expect(pageOffer(['Ridge 28 $129.'])).toEqual(ridge);
+    expect(pageOffer(['Ridge 28 – $129.'])).toEqual(ridge);
+    expect(pageOffer(['$129 – 150 reviews.'])).toEqual(ridge);
+    // Free shipping is no bill.
+    expect(pageOffer(['The Ridge 28 with free shipping costs $129.'])).toEqual(ridge);
+    expect(pageOffer(['Versandkostenfrei für nur 129 €.'])).toEqual({
+      price: 129,
+      currency: 'EUR',
+    });
+    expect(pageOffer(['Kostenloser Versand für 129 €.'])).toEqual({ price: 129, currency: 'EUR' });
+    expect(pageOffer(['Ücretsiz kargo ile 999 TL.'])).toEqual({ price: 999, currency: 'TRY' });
+    // An old price that is the page's only one is its price.
+    expect(pageOffer(['Regular price $129.00'])).toEqual(ridge);
+    // A currency after its amount stays with it; a code after a sign says whose dollar.
+    expect(pageOffer(['129,00 € 2 Jahre Garantie.'])).toEqual({ price: 129, currency: 'EUR' });
+    expect(pageOffer(['1.299,00 TL 3 taksit imkânı.'])).toEqual({ price: 1299, currency: 'TRY' });
+    // A code before a dollar sign, a Swiss apostrophe.
+    expect(pageOffer(['CAD $129.00'])).toEqual({ price: 129, currency: 'CAD' });
+    expect(pageOffer(['MX$1,299'])).toEqual({ price: 1299, currency: 'MXN' });
+    expect(pageOffer(["CHF 1'299.–"])).toEqual({ price: 1299, currency: 'CHF' });
+    expect(pageOffer(["1'299.00 CHF"])).toEqual({ price: 1299, currency: 'CHF' });
+    expect(pageOffer(['$129.00 CAD'])).toEqual({ price: 129, currency: 'CAD' });
+    expect(pageOffer(['Galaxy S24+: $999.99 (Regular price $1,099.99)'])).toEqual({
+      price: 999.99,
+      currency: 'USD',
+    });
+    expect(pageOffer(['Heats up in 3 min. $129 (reg. $159).'])).toEqual(ridge);
+    expect(pageOffer(['Kids 10-12 $129.'])).toEqual(ridge);
+  });
+
+  it('keeps the price beside an amount that isn’t it', () => {
+    // A sale: the price now, not the old one.
+    expect(pageOffer(['Now $129, was $159.'])).toEqual(ridge);
+    expect(pageOffer(['$129 (was $159).'])).toEqual(ridge);
+    expect(pageOffer(['$129 (reg. $159).'])).toEqual(ridge);
+    expect(pageOffer(['$129 instead of $159.'])).toEqual(ridge);
+    expect(pageOffer(['Regular price $159.00 Sale price $129.00'])).toEqual(ridge);
+    expect(pageOffer(['129,00 € 159,00 € statt'])).toEqual({ several: ['129,00 €', '159,00 €'] });
+    expect(pageOffer(['Original price $159. Now $129.'])).toEqual(ridge);
+    expect(pageOffer(['Au lieu de 159 €, 129 €.'])).toEqual({ price: 129, currency: 'EUR' });
+    expect(pageOffer(['Antes 159 €, ahora 129 €.'])).toEqual({ price: 129, currency: 'EUR' });
+    expect(pageOffer(['Bisher 159 €, jetzt 129 €.'])).toEqual({ price: 129, currency: 'EUR' });
+    expect(pageOffer(['Eski fiyat 1.299 TL, şimdi 999 TL.'])).toEqual({
+      price: 999,
+      currency: 'TRY',
+    });
+    expect(pageOffer(['₺1.299 yerine ₺999.'])).toEqual({ price: 999, currency: 'TRY' });
+    // Savings, worth and rewards.
+    expect(pageOffer(['Save $30: it’s $129 this week.'])).toEqual(ridge);
+    expect(pageOffer(['$129.', 'Save up to $30.'])).toEqual(ridge);
+    expect(pageOffer(['$129.', 'You save 19% ($30).'])).toEqual(ridge);
+    expect(pageOffer(['$129.', 'Free gift worth $30.'])).toEqual(ridge);
+    expect(pageOffer(['$129 ($30 value).'])).toEqual(ridge);
+    expect(pageOffer(['$129.', 'Earn $13 in rewards.'])).toEqual(ridge);
+    expect(pageOffer(['$129.', 'Get up to $200 trade-in credit.'])).toEqual(ridge);
+    expect(pageOffer(['$129.', 'Get a $10 coupon.'])).toEqual(ridge);
+    // Thresholds and shipping.
+    expect(pageOffer(['It costs $129 and ships free on orders over $50.'])).toEqual(ridge);
+    expect(pageOffer(['Free shipping on orders over $50.', 'It costs $129.'])).toEqual(ridge);
+    expect(pageOffer(['Min. order $50.', 'Price $129.'])).toEqual(ridge);
+    expect(pageOffer(['$129 with free shipping.'])).toEqual(ridge);
+    expect(pageOffer(['Shipping: $5.99.', 'Price: $129.'])).toEqual(ridge);
+    expect(pageOffer(['$129 + $9.95 shipping.'])).toEqual(ridge);
+    expect(pageOffer(['Plus $9.95 shipping.', '$129.'])).toEqual(ridge);
+    expect(pageOffer(['129,00 € inkl. MwSt., zzgl. 4,95 € Versand'])).toEqual({
+      price: 129,
+      currency: 'EUR',
+    });
+    expect(pageOffer(['Kostenloser Versand ab 50 €.', 'Preis: 129 €.'])).toEqual({
+      price: 129,
+      currency: 'EUR',
+    });
+    expect(pageOffer(['Free shipping on all orders $50+', '$129.'])).toEqual(ridge);
+    expect(pageOffer(['Kostenloser Versand für Bestellungen über 50 €.', 'Preis: 129 €.'])).toEqual(
+      { price: 129, currency: 'EUR' },
+    );
+    expect(pageOffer(['Envío gratuito en pedidos superiores a 50 €.', '129 €.'])).toEqual({
+      price: 129,
+      currency: 'EUR',
+    });
+    expect(
+      pageOffer(['Livraison gratuite pour toute commande supérieure à 50 €.', '129 €.']),
+    ).toEqual({ price: 129, currency: 'EUR' });
+    // A member's, a subscriber's or a code's price, a unit price, PayPal, a balance.
+    expect(pageOffer(['Regular price $129, or $116 with Subscribe & Save.'])).toEqual(ridge);
+    expect(pageOffer(['Regular price $129.00 Member price $116.10'])).toEqual(ridge);
+    expect(pageOffer(['$129. With code SPRING10: $116.10'])).toEqual(ridge);
+    expect(pageOffer(['Regular price $129.00 Unit price $12.90 / per 100g'])).toEqual(ridge);
+    expect(pageOffer(['UVP 129,00 € Grundpreis 25,80 € / 1 kg'])).toEqual({
+      price: 129,
+      currency: 'EUR',
+    });
+    expect(pageOffer(['Regular price $129.00', 'Pay in 4 with PayPal: $32.25'])).toEqual(ridge);
+    expect(pageOffer(['Liste fiyatı 1.599 TL, 300 TL indirimle.'])).toEqual({
+      price: 1599,
+      currency: 'TRY',
+    });
+    expect(
+      pageOffer(['$129.', 'Pre-order with a $50 deposit, balance of $79 at shipping.']),
+    ).toEqual(ridge);
+    expect(pageOffer(['Free shipping on orders between $50 and $100.', '$129.'])).toEqual(ridge);
+    // Savings and installments in other languages.
+    expect(pageOffer(['129 €.', 'Sie sparen 30 €.'])).toEqual({ price: 129, currency: 'EUR' });
+    expect(pageOffer(['129 €.', 'Économisez 30 €.'])).toEqual({ price: 129, currency: 'EUR' });
+    expect(pageOffer(['129 €, o 3 plazos de 43 €.'])).toEqual({ price: 129, currency: 'EUR' });
+    expect(pageOffer(['129 €, oder 3 Raten à 43 €.'])).toEqual({ price: 129, currency: 'EUR' });
+    expect(pageOffer(['500 TL üzeri kargo bedava.', 'Fiyatı 999 TL.'])).toEqual({
+      price: 999,
+      currency: 'TRY',
+    });
+    // Financing, a unit price, a bundle, an add-on.
+    expect(pageOffer(['$129, or 4 interest-free payments of $32.25 with Klarna.'])).toEqual(ridge);
+    expect(pageOffer(['$129, or as low as $12/mo with Affirm.'])).toEqual(ridge);
+    expect(pageOffer(['$129 ($0.50/oz).'])).toEqual(ridge);
+    expect(pageOffer(['$129 each, or 2 for $239.'])).toEqual(ridge);
+    expect(pageOffer(['$129.', 'Add a waterproof rain cover for $19.'])).toEqual(ridge);
+    expect(pageOffer(['$129.', 'Accessories: rain cover $19.'])).toEqual(ridge);
+    expect(pageOffer(['$129.', 'Rain cover ($19, sold separately).'])).toEqual(ridge);
+  });
+
+  it('guesses none: no price, prices that differ, or a range that isn’t one', () => {
+    expect(pageOffer(['A sturdy daypack for wet hikes.'])).toBeNull();
+    expect(pageOffer(['Save $30 this week.'])).toBeNull();
+    // A subscription's price is a plan's, not the product's.
+    expect(pageOffer(['$12 a month.'])).toBeNull();
+    expect(pageOffer(['$10–$20 a month.'])).toBeNull();
+    expect(pageOffer(['10–20 € pro Monat.'])).toBeNull();
+    expect(pageOffer(['$10–$20 monthly.'])).toBeNull();
+    // Prices that differ, or in two currencies: the person says which.
+    expect(pageOffer(['Small: $119.', 'Large: $139.'])).toEqual({ several: ['$119', '$139'] });
+    expect(pageOffer(['Regular: $119.95', 'Long: $129.95'])).toEqual({
+      several: ['$119.95', '$129.95'],
+    });
+    expect(pageOffer(['$129.', 'Order now: $129.00.'])).toEqual(ridge);
+    // An old price with no lower one beside it isn't dropped for an amount elsewhere.
+    expect(pageOffer(['Regular price $129.00', 'Refer a friend and get $20.'])).toEqual({
+      several: ['$129.00', '$20'],
+    });
+    // "From" and a range written loosely may be several prices.
+    expect(pageOffer(['From $119.'])).toEqual({ several: ['$119'] });
+    for (const from of [
+      'From just $129.',
+      'Starting at just $129.',
+      'As low as $129.',
+      'Pricing begins at $129.',
+      'A partir de 129 €.',
+      'A partire da 129 €.',
+      'Vanaf € 129.',
+      'Ab nur 129 €.',
+      "1.299 TL'den başlıyor.",
+    ]) {
+      expect(pageOffer([from])).toHaveProperty('several');
+    }
+    // A number written onto a price: the person says which.
+    expect(pageOffer(['PlayStation 5 549,99 €'])).toEqual({ several: ['5 549,99 €'] });
+    expect(pageOffer(['Ridge 28 € 129'])).toEqual({ several: ['28 €'] });
+    expect(pageOffer(['999 TL 3 taksit imkânı.'])).toEqual({ several: ['999 TL'] });
+    // Another product's range beside the price isn't its range.
+    expect(pageOffer(['Comparable headphones cost $200–$400, but the X1 is $299.'])).toHaveProperty(
+      'several',
+    );
+    expect(pageOffer(['From $119 up to $139.'])).toEqual({ several: ['$119'] });
+    expect(pageOffer(['Preis: 119 – 139 €.'])).toEqual({ several: ['119 – 139 €'] });
+    expect(pageOffer(['Fiyat: 999 - 1.299 TL.'])).toEqual({ several: ['999 - 1.299 TL'] });
+    expect(pageOffer(['$129 in the US, €119 in Europe.'])).toEqual({ several: ['$129', '€119'] });
+    // A number after a price isn't its range's end.
+    expect(pageOffer(['Only $19 - 100% organic cotton.'])).toEqual({ price: 19, currency: 'USD' });
+    expect(pageOffer(['$25 - 30-day money-back guarantee.'])).toEqual({
+      price: 25,
+      currency: 'USD',
+    });
+    expect(pageOffer(['€20 – 30 Tage Rückgaberecht.'])).toEqual({ price: 20, currency: 'EUR' });
+    expect(pageOffer(['$5 a 12-pack.'])).toEqual({ price: 5, currency: 'USD' });
+  });
+});
+
+describe('openingParagraph', () => {
+  it('gives the first paragraph past a byline, cut at a word under 500 characters', () => {
+    expect(
+      openingParagraph('<h1>Ridge 28</h1><p>By Acme Team</p><p>A daypack for wet hikes.</p>'),
+    ).toBe('A daypack for wet hikes.');
+    const long = openingParagraph(`<p>${'word '.repeat(150)}end.</p>`)!;
+    expect(long.length).toBeLessThanOrEqual(501);
+    expect(long.endsWith('…')).toBe(true);
+    expect(openingParagraph('<h1>Ridge 28</h1>')).toBeNull();
+  });
+});
+
+describe('productJsonLd', () => {
+  it('gives a Product with its Offer, or an AggregateOffer for a range, and only what the page states', () => {
+    expect(
+      productJsonLd({
+        name: 'Ridge 28 daypack',
+        description: 'A daypack for wet hikes.',
+        images: ['https://cdn.acme.com/ridge.jpg'],
+        brandName: 'Acme',
+        offer: { price: 129, currency: 'USD' },
+      }),
+    ).toEqual({
+      '@context': 'https://schema.org',
+      '@type': 'Product',
+      name: 'Ridge 28 daypack',
+      description: 'A daypack for wet hikes.',
+      image: 'https://cdn.acme.com/ridge.jpg',
+      brand: { '@type': 'Brand', name: 'Acme' },
+      offers: { '@type': 'Offer', price: '129.00', priceCurrency: 'USD' },
+    });
+    const range = productJsonLd({
+      name: 'Ridge 28',
+      description: 'A daypack in [color] for wet hikes.',
+      images: [],
+      brandName: 'Acme',
+      offer: { low: 119, high: 139, currency: 'EUR' },
+    });
+    // A placeholder in the description leaves it out; no availability or reviews are made up.
+    expect(range).not.toHaveProperty('description');
+    expect(range).not.toHaveProperty('image');
+    expect(range.offers).toEqual({
+      '@type': 'AggregateOffer',
+      lowPrice: '119.00',
+      highPrice: '139.00',
+      priceCurrency: 'EUR',
+    });
   });
 });
