@@ -30,6 +30,7 @@ import {
   buildTrendPoints,
   pageKey,
   parseListPage,
+  previousCompletedAudit,
   TREND_LIMIT,
 } from '../lib/audit/history.js';
 import { readAllRpcRows } from '../lib/rpc-pages.js';
@@ -54,14 +55,6 @@ import { evaluateLlmSignals } from '../lib/audit/llm-signals.js';
 import { evaluateBrandEntity } from '../lib/audit/external-signals.js';
 import { brandFactsFor, generateRecommendations } from '../lib/audit/recommendations.js';
 import { scoreAudit } from '../lib/audit/scorer.js';
-import {
-  buildAuditPages,
-  buildTrendPoints,
-  pageKey,
-  parseListPage,
-  previousCompletedAudit,
-  TREND_LIMIT,
-} from '../lib/audit/history.js';
 import { signalsByKey, TOTAL_SIGNALS, RUBRIC_VERSION } from '../lib/audit/rubric.js';
 
 const router = Router();
