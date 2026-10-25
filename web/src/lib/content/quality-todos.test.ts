@@ -103,6 +103,37 @@ describe('qualityTodos', () => {
     ).toBe(false);
   });
 
+  it('asks a comparison to show when it was last checked, with Add line where it has one (CE-052)', () => {
+    const run = (checkDate: {
+      found: boolean;
+      old?: 'line' | 'text' | null;
+      line: string | null;
+    }) =>
+      qualityTodos({
+        eeat: weighed(
+          eeat({ author: author(), checkDate: checkDate.found }),
+          PROFILE_WEIGHTS.comparison.eeat,
+        ),
+        author: author(),
+        hasAuthors: true,
+        checkDate,
+        off: checksOff('comparison'),
+      }).find((t) => t.id === 'checkDate');
+    expect(run({ found: false, line: 'Last checked: October 2026.' })).toMatchObject({
+      done: false,
+      action: 'addCheckDate',
+      score: 'eeat',
+    });
+    expect(run({ found: false, line: 'x' })!.gain).toBeGreaterThan(0);
+    // A language without a line: the person writes it.
+    expect(run({ found: false, line: null })!.action).toBeNull();
+    expect(run({ found: true, line: 'x' })).toMatchObject({ done: true, action: null, gain: 0 });
+    // An old date: Add line's own line (it replaces it) or the person's words (#1495 review).
+    expect(run({ found: false, old: 'line', line: 'x' })).toMatchObject({ old: 'line' });
+    expect(run({ found: false, old: 'text', line: 'x' })).toMatchObject({ old: 'text' });
+    expect(run({ found: true, old: null, line: 'x' })).not.toHaveProperty('old');
+  });
+
   it('asks to add an author when the workspace has none', () => {
     expect(todos(null, false)[0]).toEqual({
       id: 'byline',
