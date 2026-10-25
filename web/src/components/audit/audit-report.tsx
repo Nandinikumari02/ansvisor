@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useTranslations } from 'next-intl';
+import { useFormatter, useTranslations } from 'next-intl';
 import { toast } from 'sonner';
 import {
   ChevronDown,
@@ -11,6 +11,8 @@ import {
   Minus,
   Sparkles,
   Copy,
+  TrendingUp,
+  TrendingDown,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -259,6 +261,55 @@ function RecommendationItem({ rec }: { rec: AuditRecommendation }) {
     </div>
   );
 }
+/**
+ * The score change since the page's previous completed audit ("+7 since Sep 28"),
+ * in the same whole points the Pages list compares. Nothing when there is no
+ * earlier audit, or this one has no score.
+ */
+export function ScoreChange({
+  score,
+  previous,
+}: {
+  score: number | null;
+  previous: AuditResult['previous'];
+}) {
+  const t = useTranslations('audit');
+  const format = useFormatter();
+
+  const current = pct(score);
+  if (!previous || current === null) return null;
+
+  const delta = current - (pct(previous.totalScore) ?? 0);
+  const since = new Date(previous.createdAt);
+  const date = format.dateTime(since, {
+    month: 'short',
+    day: 'numeric',
+    // The year only when the earlier audit is from another year.
+    ...(since.getUTCFullYear() === new Date().getUTCFullYear() ? {} : { year: 'numeric' }),
+  });
+
+  const Icon = delta > 0 ? TrendingUp : delta < 0 ? TrendingDown : Minus;
+  const label =
+    delta > 0
+      ? t('scoreChange.up', { points: delta, date })
+      : delta < 0
+        ? t('scoreChange.down', { points: Math.abs(delta), date })
+        : t('scoreChange.same', { date });
+
+  return (
+    <span
+      data-testid="score-change"
+      className={cn(
+        'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium',
+        delta > 0 && 'bg-green-600/10 text-green-700',
+        delta < 0 && 'bg-destructive/10 text-destructive',
+        delta === 0 && 'bg-muted text-muted-foreground',
+      )}
+    >
+      <Icon className="h-3.5 w-3.5" /> {label}
+    </span>
+  );
+}
 
 export function AuditReport({ audit }: { audit: AuditResult }) {
   const t = useTranslations('audit');
@@ -291,8 +342,11 @@ export function AuditReport({ audit }: { audit: AuditResult }) {
           <div className="flex-1 space-y-2 text-center sm:text-left">
             <div className="text-sm font-medium break-all">{audit.finalUrl || audit.url}</div>
             {grade && (
-              <div className={cn('text-lg font-semibold', scoreColor(audit.totalScore))}>
-                {t(`grade.${grade}`)}
+              <div className="flex flex-wrap items-center justify-center gap-2 sm:justify-start">
+                <span className={cn('text-lg font-semibold', scoreColor(audit.totalScore))}>
+                  {t(`grade.${grade}`)}
+                </span>
+                <ScoreChange score={audit.totalScore} previous={audit.previous} />
               </div>
             )}
             <div className="flex flex-wrap justify-center gap-2 sm:justify-start">

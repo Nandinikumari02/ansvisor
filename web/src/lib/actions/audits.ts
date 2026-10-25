@@ -37,6 +37,11 @@ export interface AuditRecommendation {
   /** JSON-LD or HTML to paste. Older audits keep markup in `draft` and lack this. */
   code?: string | null;
 }
+export interface AuditPrevious {
+  id: string;
+  totalScore: number;
+  createdAt: string;
+}
 
 export interface AuditResult {
   id: string;
@@ -54,6 +59,7 @@ export interface AuditResult {
   completedAt: string | null;
   signals: AuditSignal[];
   recommendations: AuditRecommendation[];
+  previous?: AuditPrevious | null;
 }
 
 export interface AuditQuota {

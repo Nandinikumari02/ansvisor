@@ -3,7 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { NextIntlClientProvider } from 'next-intl';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import messages from '../../../messages/en.json';
-import type { AuditRecommendation, AuditResult } from '@/lib/actions/audits';
+import type { AuditPrevious, AuditRecommendation, AuditResult } from '@/lib/actions/audits';
 import { AuditReport } from './audit-report';
 
 (
@@ -45,15 +45,17 @@ const audit = (recommendations: AuditRecommendation[]): AuditResult => ({
 let container: HTMLDivElement;
 let root: Root;
 
-function render(recommendations: AuditRecommendation[]) {
+function render(recommendations: AuditRecommendation[], previous?: AuditPrevious | null) {
   act(() => {
     root.render(
       <NextIntlClientProvider locale="en" messages={messages} timeZone="UTC">
-        <AuditReport audit={audit(recommendations)} />
+        <AuditReport audit={{ ...audit(recommendations), previous }} />
       </NextIntlClientProvider>,
     );
   });
 }
+
+const scoreChange = () => container.querySelector('[data-testid="score-change"]')?.textContent;
 
 const marks = () => [...container.querySelectorAll('pre mark')].map((m) => m.textContent);
 
@@ -106,5 +108,40 @@ describe('AuditReport recommendations', () => {
     expect(container.querySelectorAll('pre')).toHaveLength(1);
     expect(marks()).toEqual([]);
     expect(container.textContent).not.toContain(NOTE);
+  });
+});
+
+describe('AuditReport score change', () => {
+  const previous = (totalScore: number, createdAt = '2026-09-28T09:00:00.000Z') => ({
+    id: 'a0',
+    totalScore,
+    createdAt,
+  });
+
+  it('shows the points gained since the previous audit, with its date', () => {
+    render([], previous(0.56));
+    expect(scoreChange()).toContain('+7 since Sep 28');
+  });
+
+  it('shows the points lost since the previous audit', () => {
+    render([], previous(0.7));
+    expect(scoreChange()).toContain('−7 since Sep 28');
+  });
+
+  it('says so when the score did not change', () => {
+    render([], previous(0.63));
+    expect(scoreChange()).toContain('No change since Sep 28');
+  });
+
+  it('includes the year when the previous audit is from another year', () => {
+    render([], previous(0.5, '2025-12-30T09:00:00.000Z'));
+    expect(scoreChange()).toContain('since Dec 30, 2025');
+  });
+
+  it('shows nothing without an earlier audit', () => {
+    render([], null);
+    expect(scoreChange()).toBeUndefined();
+    render([]);
+    expect(scoreChange()).toBeUndefined();
   });
 });

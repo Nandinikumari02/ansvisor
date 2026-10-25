@@ -2819,6 +2819,11 @@
     "why": "Why",
     "recommendedFix": "Recommended fix",
     "fix": "Fix",
+    "scoreChange": {
+      "up": "+{points} since {date}",
+      "down": "−{points} since {date}",
+      "same": "No change since {date}"
+    },
     "signalsEvaluated": "signals evaluated",
     "aiRecommendations": "AI Recommendations",
     "signals": "Signals",

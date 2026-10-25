@@ -6,6 +6,7 @@ import {
   pageKey,
   pageStatus,
   parseListPage,
+  previousCompletedAudit,
   LIST_DEFAULT_LIMIT,
   LIST_MAX_LIMIT,
   PAGE_TREND_POINTS,
@@ -117,7 +118,61 @@ describe('pageStatus', () => {
     expect(pageStatus(run('failed'), audit(0.8), null)).toBe('good');
   });
 });
+describe('previousCompletedAudit', () => {
+  const row = (id, url, created_at, total_score, status = 'completed', final_url = url) => ({
+    id,
+    url,
+    final_url: status === 'completed' ? final_url : null,
+    status,
+    total_score,
+    created_at,
+  });
 
+  it('finds the page’s completed audit just before this one', () => {
+    const rows = [
+      row('a3', 'https://acme.com/pricing/', '2026-10-14T09:00:00Z', '0.63'),
+      row('b1', 'https://acme.com/blog', '2026-10-12T09:00:00Z', '0.74'),
+      row('a2', 'https://www.acme.com/pricing', '2026-10-01T09:00:00Z', '0.58'),
+      row('a1', 'https://acme.com/pricing', '2026-09-20T09:00:00Z', '0.5'),
+    ];
+    expect(previousCompletedAudit(rows, 'a3')).toEqual({
+      id: 'a2',
+      totalScore: 0.58,
+      createdAt: '2026-10-01T09:00:00Z',
+    });
+    expect(previousCompletedAudit(rows, 'a2')).toMatchObject({ id: 'a1', totalScore: 0.5 });
+  });
+
+  it('is null for the first audit of a page, an unknown audit, or no rows', () => {
+    const rows = [
+      row('a2', 'https://acme.com/pricing', '2026-10-14T09:00:00Z', '0.6'),
+      row('b1', 'https://acme.com/blog', '2026-10-12T09:00:00Z', '0.74'),
+    ];
+    expect(previousCompletedAudit(rows, 'a2')).toBeNull();
+    expect(previousCompletedAudit(rows, 'zzz')).toBeNull();
+    expect(previousCompletedAudit([], 'a2')).toBeNull();
+    expect(previousCompletedAudit(undefined, 'a2')).toBeNull();
+  });
+
+  it('skips failed and running runs, and a later audit of the page', () => {
+    const rows = [
+      row('a4', 'https://acme.com/pricing', '2026-10-16T09:00:00Z', '0.7'),
+      row('a3', 'https://acme.com/pricing', '2026-10-15T09:00:00Z', null, 'running'),
+      row('a2', 'https://acme.com/pricing', '2026-10-14T09:00:00Z', null, 'failed'),
+      row('a1', 'https://acme.com/pricing', '2026-10-01T09:00:00Z', '0.58'),
+    ];
+    expect(previousCompletedAudit(rows, 'a4')).toMatchObject({ id: 'a1', totalScore: 0.58 });
+    expect(previousCompletedAudit(rows, 'a1')).toBeNull();
+  });
+
+  it('keeps a previous score of 0', () => {
+    const rows = [
+      row('a2', 'https://acme.com/', '2026-10-14T09:00:00Z', '0.2'),
+      row('a1', 'https://acme.com/', '2026-10-01T09:00:00Z', '0'),
+    ];
+    expect(previousCompletedAudit(rows, 'a2')).toMatchObject({ id: 'a1', totalScore: 0 });
+  });
+});
 describe('buildAuditPages', () => {
   const row = (id, url, created_at, total_score, status = 'completed', final_url = url) => ({
     id,

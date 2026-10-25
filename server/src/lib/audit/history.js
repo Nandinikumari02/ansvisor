@@ -109,6 +109,34 @@ export function pageStatus(latestRun, current, previous) {
  * lastAuditSource says whether the audit the row opens was an auto-audit
  * run's (SA-006) or a user's; rows read without `source` count as the user's.
  */
+
+export function previousCompletedAudit(rowsNewestFirst, auditId) {
+  const rows = rowsNewestFirst ?? [];
+  const at = rows.findIndex((r) => r.id === auditId);
+  if (at === -1) return null;
+
+  const urlOf = (r) => r.final_url ?? r.url;
+  const keyOf = (r) => pageKey(urlOf(r))?.key ?? urlOf(r);
+  const key = keyOf(rows[at]);
+
+  const previous = rows
+    .slice(at + 1)
+    .find(
+      (r) =>
+        r.id !== auditId &&
+        r.status === 'completed' &&
+        r.total_score !== null &&
+        r.total_score !== undefined &&
+        keyOf(r) === key,
+    );
+  if (!previous) return null;
+
+  return {
+    id: previous.id,
+    totalScore: Number(previous.total_score),
+    createdAt: previous.created_at,
+  };
+}
 export function buildAuditPages(rowsNewestFirst, now = Date.now()) {
   const groups = new Map();
   // Rows read in slices can repeat one at a slice boundary.

@@ -54,6 +54,14 @@ import { evaluateLlmSignals } from '../lib/audit/llm-signals.js';
 import { evaluateBrandEntity } from '../lib/audit/external-signals.js';
 import { brandFactsFor, generateRecommendations } from '../lib/audit/recommendations.js';
 import { scoreAudit } from '../lib/audit/scorer.js';
+import {
+  buildAuditPages,
+  buildTrendPoints,
+  pageKey,
+  parseListPage,
+  previousCompletedAudit,
+  TREND_LIMIT,
+} from '../lib/audit/history.js';
 import { signalsByKey, TOTAL_SIGNALS, RUBRIC_VERSION } from '../lib/audit/rubric.js';
 
 const router = Router();
@@ -1201,8 +1209,21 @@ router.get('/:id', async (req, res) => {
       .from('audit_signal_results')
       .select('*')
       .eq('audit_id', id);
+      let previous = null;
+    if (audit.status === 'completed' && audit.total_score !== null) {
+      try {
+        const { data: rows, error } = await readBrandAudits(audit.brand_id);
+        if (error) throw error;
+        previous = previousCompletedAudit(rows, id);
+      } catch (err) {
+        req.log.warn({ err }, 'previous audit lookup failed');
+      }
+    }
 
-    return res.json({ success: true, audit: assembleAudit(audit, signalRows ?? []) });
+    return res.json({
+      success: true,
+      audit: { ...assembleAudit(audit, signalRows ?? []), previous },
+    });
   } catch (err) {
     if (err.status) {
       return res.status(err.status).json({ success: false, message: err.message });
