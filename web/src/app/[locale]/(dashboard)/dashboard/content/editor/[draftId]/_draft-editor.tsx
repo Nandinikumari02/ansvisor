@@ -112,7 +112,13 @@ import {
 import { proofKey, qualityTodos } from '@/lib/content/quality-todos';
 import { readability, sentencesOf } from '@/lib/content/readability';
 import { brandFactsPath, factMismatches } from '@/lib/content/brand-facts';
-import { MAX_PROOF_TODOS, pageImages, proofsOnPage, type ProofSpot } from '@/lib/content/page-read';
+import {
+  MAX_PROOF_TODOS,
+  aiChecksOnPage,
+  pageImages,
+  proofsOnPage,
+  type ProofSpot,
+} from '@/lib/content/page-read';
 import {
   liveSkips,
   nextStep,
@@ -358,12 +364,15 @@ export function DraftEditor({
   const onDecide = useRef<(id: string, decision: SuggestionDecision) => void>(() => {});
   // A picked page type, or the one the page shows as it is written. As on
   // a save, a page that shows no type keeps the one it had (the stored one
-  // to start with), so the header and the Library agree.
+  // to start with), so the header and the Library agree; read with the
+  // existing page's address, as Start read it, so both agree on it too.
   const [picked, setPicked] = useState(draft.pageTypeSource === 'user' ? draft.pageType : null);
   const [detectedType, setDetectedType] = useState(
     () =>
-      detectPageType({ title: draft.title, html: draft.bodyHtml }, draft.siteType) ??
-      (isPageType(draft.pageType) ? draft.pageType : null),
+      detectPageType(
+        { title: draft.title, html: draft.bodyHtml, url: draft.sourceUrl },
+        draft.siteType,
+      ) ?? (isPageType(draft.pageType) ? draft.pageType : null),
   );
   // The brand's site type (Quality CE-056, the spec's business type), changed
   // here for the whole brand; a ref too, as the editor's update handler is
@@ -372,7 +381,7 @@ export function DraftEditor({
   const siteTypeRef = useRef(draft.siteType);
   const detectType = (title: string, html: string) => {
     const site = siteTypeRef.current;
-    setDetectedType((had) => detectPageType({ title, html }, site) ?? had);
+    setDetectedType((had) => detectPageType({ title, html, url: draft.sourceUrl }, site) ?? had);
   };
   const pageType = picked ?? detectedType;
   // The HTML view's text while it is open; null in the visual editor.
@@ -539,10 +548,6 @@ export function DraftEditor({
   const language =
     languageRule?.on && languageRule.current.trim() ? languageRule.current : brandLanguage;
   const qualityOn = qualityPhase() >= 1;
-  const readable = useMemo(
-    () => (qualityOn ? readability(pageHtml, language) : null),
-    [qualityOn, pageHtml, language],
-  );
 
   // Who the page is by (CE-038): page metadata, shown in the header and in a
   // Page info strip outside the page; with Quality's first phase.
@@ -683,12 +688,48 @@ export function DraftEditor({
   // The page's own claims that need the brand's proof (CE-049), read from
   // the whole page after a save: proof to-dos while their paragraph has no
   // link, and its own-site link counts as their source.
-  // Only changes on their way hold the ask, as the claims': not a failed
-  // save, a conflict or a page too large.
-  const pageRead = usePageRead(draft.id, autosave.savedAt, sourcesOn, saving);
+  // Asked again when the page type changes too: the checks depend on it
+  // (CE-050). Only changes on their way hold the ask, as the claims': not a
+  // failed save, a conflict or a page too large.
+  const pageRead = usePageRead(
+    draft.id,
+    `${autosave.savedAt}\n${pageType ?? ''}`,
+    sourcesOn,
+    saving,
+  );
   const proofAsks = useMemo(
     () => (pageRead.read ? proofsOnPage(pageBlocks, pageRead.read.proofs) : []),
     [pageRead.read, pageBlocks],
+  );
+  // The page read's AI checks (CE-050), on the page as it is: left out
+  // before the first read, and once the AI budget or the day's reads are
+  // used up (Quality says so), as the score can't follow the page then.
+  // Read for another page type: unknown until a read for this one lands.
+  // An edit holds what was found until the page as it is is read: while it
+  // waits for its save too, not only once the ask is out.
+  const pageChanging = pageRead.reading || saving;
+  const aiChecks = useMemo(
+    () =>
+      sourcesOn &&
+      pageRead.read?.checks &&
+      pageRead.read.checks.pageType === (pageType ?? null) &&
+      !pageRead.paused &&
+      !pageRead.limited
+        ? aiChecksOnPage(pageBlocks, pageRead.read.checks, pageType, pageChanging)
+        : null,
+    [
+      sourcesOn,
+      pageRead.read,
+      pageChanging,
+      pageRead.paused,
+      pageRead.limited,
+      pageBlocks,
+      pageType,
+    ],
+  );
+  const readable = useMemo(
+    () => (qualityOn ? readability(pageHtml, language, aiChecks?.answerFirst ?? null) : null),
+    [qualityOn, pageHtml, language, aiChecks],
   );
   // A proof to-do asked for this session stays, checked once it has a link.
   const [hadProofs, setHadProofs] = useState<ReadonlySet<string>>(() => new Set());
@@ -736,7 +777,13 @@ export function DraftEditor({
   const eeatScore = useMemo(
     () =>
       qualityOn && authorsRead && !inputsPending && (!sourcesOn || visualRead)
-        ? eeat({ author: pageAuthor, used, visual, confirmed: authorConfirmed })
+        ? eeat({
+            author: pageAuthor,
+            used,
+            visual,
+            how: aiChecks?.how ?? null,
+            confirmed: authorConfirmed,
+          })
         : null,
     [
       qualityOn,
@@ -747,6 +794,7 @@ export function DraftEditor({
       pageAuthor,
       used,
       visual,
+      aiChecks,
       authorConfirmed,
     ],
   );
@@ -795,7 +843,8 @@ export function DraftEditor({
         : null,
     [sourcesOn, competitorDomains, pageType, keptSources, aiKinds],
   );
-  // The brand's own links aren't sources: Trust waits for its domains.
+  // The brand's own links aren't sources: Trust waits for its domains. The
+  // page read's balance and disclosure (phase 2) join when it lands.
   const trustScore = useMemo(
     () =>
       qualityOn && brandDomains && !inputsPending
@@ -809,6 +858,7 @@ export function DraftEditor({
             claims: claimBlocks,
             brandFacts: factCheck,
             proofs: proofAsks,
+            page: aiChecks,
             now: Date.now(),
           })
         : null,
@@ -824,6 +874,7 @@ export function DraftEditor({
       claimBlocks,
       factCheck,
       proofAsks,
+      aiChecks,
     ],
   );
   // Their links underlined in the draft, Quality's suggestion naming them.
@@ -968,6 +1019,7 @@ export function DraftEditor({
         claimsReading: claimsRead.reading,
         pagePaused: pageRead.paused,
         pageLimited: pageRead.limited,
+        aiChecks,
         pageReading: pageRead.reading,
         siteType,
         brandFactsPath: sourcesOn ? brandFactsPath(draft.brandId) : null,

@@ -39,7 +39,12 @@ import { sanitizeDraftHtml } from '@/lib/content/sanitize-draft-html';
 import { matchPagePrompts } from '@/lib/content/page-prompts';
 import type { LinkCheck } from '@/lib/content/quality-checks';
 import { CLAIM_KINDS, type ClaimBlock } from '@/lib/content/claims';
-import { PROOF_KINDS, type PageRead } from '@/lib/content/page-read';
+import {
+  PROOF_KINDS,
+  type PageChecks,
+  type PageQuote,
+  type PageRead,
+} from '@/lib/content/page-read';
 import { MAX_SOURCE_SITES, type AiSourceClass } from '@/lib/content/source-class';
 import {
   NO_DRAFT_RULES,
@@ -1268,13 +1273,17 @@ export async function saveContentDraft(
       .eq('id', id)
       .eq('updated_at', expected)
       .or(`agent_state.is.null,agent_state.neq.writing,agent_state_at.lt."${writingSince}"`)
-      .select(`updated_at, page_type, page_type_source, ${BRAND_SITE}`)
+      .select(`updated_at, page_type, page_type_source, source_url, ${BRAND_SITE}`)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (data) {
       let updatedAt: string = data.updated_at;
       if (data.page_type_source === 'detected') {
-        const detected = detectPageType({ title, html: bodyHtml }, brandSiteType(data.brands));
+        // With the existing page's address, as Start detected it.
+        const detected = detectPageType(
+          { title, html: bodyHtml, url: data.source_url },
+          brandSiteType(data.brands),
+        );
         // A page that shows no type keeps the one it had (Start's guess).
         if (detected && detected !== data.page_type) {
           // Only over this save: a write in between would otherwise become
@@ -1720,14 +1729,14 @@ export async function restoreDraftVersion(id: string, versionId: string): Promis
   // Read back, so the type is detected only on the draft the version restored.
   const { data: row, error: rowError } = await supabase
     .from('content_drafts')
-    .select(`page_type, page_type_source, body_html, ${BRAND_SITE}`)
+    .select(`page_type, page_type_source, body_html, source_url, ${BRAND_SITE}`)
     .eq('id', id)
     .maybeSingle();
   if (rowError) {
     console.error('Failed to read the restored draft:', rowError.message);
   } else if (row?.page_type_source === 'detected' && row.body_html === restored.bodyHtml) {
     const detected = detectPageType(
-      { title: restored.title, html: restored.bodyHtml },
+      { title: restored.title, html: restored.bodyHtml, url: row.source_url },
       brandSiteType(row.brands),
     );
     // A page that shows no type keeps the one it had, as on a save.
@@ -2372,6 +2381,32 @@ export async function saveMyRuleSet(
   if (error) throw new Error(error.message);
 }
 
+/** The page read's checks as the API gives them (CE-050), each found one with its words; else null. */
+function pageChecksOf(value: unknown): PageChecks | null {
+  if (!value || typeof value !== 'object') return null;
+  const checks = value as Record<string, unknown>;
+  const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+  const quote = (v: unknown): PageQuote | null => {
+    const find = v as Partial<PageQuote> | null;
+    return find && text(find.quote) && text(find.block)
+      ? { quote: find.quote, block: find.block }
+      : null;
+  };
+  const first = checks.answerFirst as { answers?: unknown; block?: unknown } | null;
+  return {
+    answerFirst:
+      first && typeof first.answers === 'boolean' && text(first.block)
+        ? { answers: first.answers, block: first.block }
+        : null,
+    recommends: quote(checks.recommends),
+    disclosure: quote(checks.disclosure),
+    balance: quote(checks.balance),
+    how: quote(checks.how),
+    cut: checks.cut === true,
+    pageType: typeof checks.pageType === 'string' ? checks.pageType : null,
+  };
+}
+
 /**
  * Quality's page read for proof (CE-049): the draft's visual proof spots
  * and proof asks, read by the API from the page as saved, with its page
@@ -2406,7 +2441,8 @@ export async function readDraftPage(
       return { error: body.code === 'off' ? 'off' : 'failed' };
     }
     if (!res.ok) return { error: 'failed' };
-    const body = (await res.json()) as Partial<PageRead> & {
+    const body = (await res.json()) as Partial<Omit<PageRead, 'checks'>> & {
+      checks?: unknown;
       pending?: boolean;
       limited?: boolean;
       paused?: boolean;
@@ -2424,6 +2460,7 @@ export async function readDraftPage(
         body.regulated === 'health' || body.regulated === 'finance' || body.regulated === 'legal'
           ? body.regulated
           : null,
+      checks: pageChecksOf(body.checks),
       pending: body.pending ?? false,
       limited: body.limited ?? false,
       paused: body.paused ?? false,
