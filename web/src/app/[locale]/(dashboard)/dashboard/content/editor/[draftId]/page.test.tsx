@@ -25,6 +25,8 @@ const confirmDraftAuthor = vi.fn();
 const checkDraftClaims = vi.fn();
 const readDraftPage = vi.fn();
 const getOwnImages = vi.fn();
+const getDraftConfirmations = vi.fn();
+const confirmDraftItem = vi.fn();
 const confirmOwnImage = vi.fn();
 const getBrandFacts = vi.fn();
 const checkDraftLinks = vi.fn();
@@ -106,6 +108,8 @@ vi.mock('@/lib/actions/content-drafts', () => ({
   checkDraftClaims: (...args: unknown[]) => checkDraftClaims(...args),
   readDraftPage: (...args: unknown[]) => readDraftPage(...args),
   getOwnImages: (...args: unknown[]) => getOwnImages(...args),
+  getDraftConfirmations: (...args: unknown[]) => getDraftConfirmations(...args),
+  confirmDraftItem: (...args: unknown[]) => confirmDraftItem(...args),
   confirmOwnImage: (...args: unknown[]) => confirmOwnImage(...args),
   checkDraftLinks: (...args: unknown[]) => checkDraftLinks(...args),
 }));
@@ -313,6 +317,8 @@ beforeEach(() => {
   checkDraftClaims.mockReset().mockResolvedValue({ blocks: [], pending: 0, limited: false });
   readDraftPage.mockReset().mockResolvedValue({ error: 'off' });
   getOwnImages.mockReset().mockResolvedValue([]);
+  getDraftConfirmations.mockReset().mockResolvedValue([]);
+  confirmDraftItem.mockReset().mockResolvedValue('ok');
   confirmOwnImage.mockReset().mockResolvedValue('ok');
   getBrandFacts.mockReset().mockResolvedValue({
     facts: [],
@@ -3235,6 +3241,47 @@ describe('the side panel', () => {
       expect(link?.textContent).toBe('the fastest forecasting app');
     });
 
+    it('asks a feature page to confirm a customer case may be published, in phase 3 (CE-052)', async () => {
+      process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '3';
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const block = 'Acme cut its close time by 40% with Ledgerly in one quarter.';
+      readDraftPage.mockResolvedValue({
+        spots: [],
+        proofs: [{ claim: 'Acme cut its close time by 40%', block, kind: 'customer_case' }],
+        regulated: null,
+        pending: false,
+        limited: false,
+        paused: false,
+      });
+      getContentDraft.mockResolvedValue({
+        ...claimed,
+        pageType: 'feature_page',
+        bodyHtml: `${claimed.bodyHtml}<p>${block}</p>`,
+      });
+      window.innerWidth = 1440;
+      await renderPage();
+      await act(async () => void (await vi.advanceTimersByTimeAsync(3_000)));
+      expect(getDraftConfirmations).toHaveBeenCalledWith('d1');
+      const chip = [...container.querySelectorAll<HTMLButtonElement>('header button')].find((b) =>
+        b.textContent?.startsWith('Quality'),
+      )!;
+      await act(async () => chip.click());
+      const row = () =>
+        [...panel()!.querySelectorAll('li')].find((li) =>
+          li.textContent?.includes('Confirm you may publish the customer case'),
+        )!;
+      expect(row().textContent).toContain('only with their permission');
+      await act(async () =>
+        [...row().querySelectorAll('button')].find((b) => b.textContent === 'Confirm')!.click(),
+      );
+      expect(confirmDraftItem).toHaveBeenCalledWith(
+        'd1',
+        'customer_case',
+        expect.stringMatching(/^case:/),
+      );
+      expect(row().textContent).toContain('You confirmed the customer may be named');
+    });
+
     it("asks for the proof of the brand's own claim, and Add proof link selects it (CE-049)", async () => {
       process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '2';
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -3299,6 +3346,51 @@ describe('the side panel', () => {
         li.textContent?.includes('the fastest forecasting app'),
       )!;
       expect(done.textContent).toContain('The proof is linked');
+    });
+
+    it('hands off with the customer cases’ paragraphs left as they are, in phase 3 (#1496 review)', async () => {
+      process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '3';
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      getContentAuthors.mockResolvedValue({
+        authors: [],
+        brands: [{ id: 'b1', name: 'Ledgerly' }],
+        me: { id: 'u1', role: 'admin' },
+      });
+      const block = 'Acme cut its close time by 40% with Ledgerly in one quarter.';
+      readDraftPage.mockResolvedValue({
+        spots: [],
+        proofs: [{ claim: 'Acme cut its close time by 40%', block, kind: 'customer_case' }],
+        regulated: null,
+        pending: false,
+        limited: false,
+        paused: false,
+      });
+      const long = `Teams ${Array.from({ length: 39 }, () => 'plan').join(' ')}.`;
+      getContentDraft.mockResolvedValue({
+        ...claimed,
+        pageType: 'feature_page',
+        bodyHtml: `${claimed.bodyHtml}<p>${block}</p><p>${long}</p>`,
+      });
+      window.innerWidth = 1440;
+      await renderPage();
+      await act(async () => void (await vi.advanceTimersByTimeAsync(3_000)));
+      const chip = [...container.querySelectorAll<HTMLButtonElement>('header button')].find((b) =>
+        b.textContent?.startsWith('Quality'),
+      )!;
+      await act(async () => chip.click());
+      const card = panel()!.querySelector('[aria-label="Hand it off to Content Agent"]')!;
+      await act(async () =>
+        [...card.querySelectorAll<HTMLButtonElement>('button')]
+          .find((b) => b.textContent === 'Hand off')!
+          .click(),
+      );
+      await act(async () => void (await vi.advanceTimersByTimeAsync(0)));
+      // The server leaves a locked passage as it is: the case's paragraph is one.
+      expect(handOffDraft).toHaveBeenCalledWith(
+        'd1',
+        'b1',
+        expect.objectContaining({ locked: expect.arrayContaining([block]) }),
+      );
     });
 
     it("hands the page's open Quality suggestions off to the agent in one run (CE-051)", async () => {

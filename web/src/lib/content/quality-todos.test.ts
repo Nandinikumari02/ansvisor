@@ -3,7 +3,7 @@ import type { ContentAuthor } from './authors';
 import type { PageProof } from './page-read';
 import { eeat, trust, trustBlocks } from './quality-checks';
 import { PROFILE_WEIGHTS, checksOff, weighed, weighedTrust } from './quality-profiles';
-import { proofKey, qualityTodos } from './quality-todos';
+import { caseConfirmed, caseKey, proofKey, qualityTodos } from './quality-todos';
 
 /** Your to-dos (Quality spec §4, CE-040): only what the person can do, read from the checks. */
 
@@ -132,6 +132,104 @@ describe('qualityTodos', () => {
     expect(run({ found: false, old: 'line', line: 'x' })).toMatchObject({ old: 'line' });
     expect(run({ found: false, old: 'text', line: 'x' })).toMatchObject({ old: 'text' });
     expect(run({ found: true, old: null, line: 'x' })).not.toHaveProperty('old');
+  });
+
+  it('asks to confirm a customer case may be published, not to link it, in Phase 3 (CE-052)', () => {
+    const ask = (linked: boolean, kind: 'customer_case' | 'award' = 'customer_case') => ({
+      claim: 'Acme cut close time 40%',
+      block: 'Acme cut close time 40% with Ledgerly.',
+      kind,
+      sentence: 'Acme cut close time 40% with Ledgerly.',
+      linked,
+    });
+    const run = (
+      a: ReturnType<typeof ask>,
+      cases: ReadonlySet<string> | null,
+      had: string[] = [],
+    ) =>
+      qualityTodos({
+        eeat: weighed(
+          eeat({
+            author: null,
+            cases: { total: 1, confirmed: cases?.has(caseKey(a)) ? 1 : 0 },
+          }),
+          PROFILE_WEIGHTS.feature.eeat,
+        ),
+        author: null,
+        hasAuthors: true,
+        proofs: { asks: [a], had: new Set(had) },
+        cases,
+        off: checksOff('feature'),
+      }).find((t) => t.id === 'proof');
+    // Linked isn't enough: only the person knows they may name the customer.
+    expect(run(ask(true), new Set())).toMatchObject({
+      done: false,
+      action: 'confirmCase',
+      score: 'eeat',
+      key: caseKey(ask(true)),
+    });
+    expect(run(ask(true), new Set())!.gain).toBeGreaterThan(0);
+    expect(run(ask(false), new Set([caseKey(ask(false))]), [caseKey(ask(false))])).toMatchObject({
+      done: true,
+      gain: 0,
+    });
+    // Keyed by the claim alone: a typo fixed in its paragraph keeps the confirm.
+    expect(caseKey({ claim: 'Acme cut close time 40%' })).toBe(
+      caseKey({ claim: 'Acme  cut close time 40% ' }),
+    );
+    // Before Phase 3 (or before they're read): the link, on Trust, as before.
+    expect(run(ask(false), null)).toMatchObject({ action: 'addProof', score: 'trust' });
+    // Another kind of proof stays a link in Phase 3.
+    expect(run(ask(false, 'award'), new Set())).toMatchObject({
+      action: 'addProof',
+      score: 'trust',
+    });
+  });
+
+  it('keeps a case confirmed when the next read picks other words of its sentence (#1496 review)', () => {
+    const sentence = 'Acme cut its close time by 40% with Ledgerly in one quarter.';
+    const shorter = { claim: 'Acme cut its close time', sentence };
+    const longer = { claim: 'Acme cut its close time by 40%', sentence };
+    // Confirmed on one slice, read again as the other: still confirmed, no second row.
+    expect(caseConfirmed(new Set([caseKey(shorter)]), longer)).toBe(true);
+    expect(caseConfirmed(new Set([caseKey(longer)]), shorter)).toBe(true);
+    // Another case, or a name alone, isn't this one.
+    const other = {
+      claim: 'Brightline doubled its pipeline',
+      sentence: 'Brightline doubled its pipeline.',
+    };
+    expect(caseConfirmed(new Set([caseKey(shorter)]), other)).toBe(false);
+    expect(caseConfirmed(new Set(['case:acme']), longer)).toBe(false);
+    // A confirm of another kind doesn't count.
+    expect(caseConfirmed(new Set([`intro:${caseKey(longer).slice(5)}`]), longer)).toBe(false);
+  });
+
+  it('says linking a confirmed case still raises Trust (#1496 review)', () => {
+    const sentence = 'Acme cut its close time by 40% with Ledgerly.';
+    const read = trust({
+      blocks: trustBlocks(`<p>${sentence}</p>`),
+      links: new Map(),
+      brandDomains: ['ledgerly.com'],
+      now: Date.parse('2026-10-25'),
+    });
+    const ask = {
+      claim: 'Acme cut its close time by 40%',
+      block: sentence,
+      kind: 'customer_case' as const,
+      sentence,
+      linked: false,
+    };
+    const row = qualityTodos({
+      eeat: null,
+      trust: read,
+      author: null,
+      hasAuthors: true,
+      proofs: { asks: [ask], had: new Set([caseKey(ask)]) },
+      cases: new Set([caseKey(ask)]),
+      off: checksOff('feature'),
+    }).find((t) => t.id === 'proof')!;
+    expect(row).toMatchObject({ done: true, action: 'confirmCase' });
+    expect(row.trustGain).toBeGreaterThan(0);
   });
 
   it('asks to add an author when the workspace has none', () => {

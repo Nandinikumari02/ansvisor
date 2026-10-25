@@ -46,7 +46,9 @@ import {
   setContentDraftReviewer,
   confirmDraftAuthor,
   keepDraftSource,
+  confirmDraftItem,
   confirmOwnImage,
+  getDraftConfirmations,
   getOwnImages,
   setContentDraftPageType,
   startAgentWriting,
@@ -124,7 +126,7 @@ import {
   weighed,
   weighedTrust,
 } from '@/lib/content/quality-profiles';
-import { proofKey, qualityTodos } from '@/lib/content/quality-todos';
+import { caseConfirmed, caseKey, proofKey, qualityTodos } from '@/lib/content/quality-todos';
 import { isByline, readability, sentencesOf, withTypeRules } from '@/lib/content/readability';
 import { brandFactsPath, factMismatches } from '@/lib/content/brand-facts';
 import {
@@ -767,9 +769,7 @@ export function DraftEditor({
   // A comparison's check date (CE-052): E-E-A-T's check and its to-do.
   const checkDateRead = useMemo(
     () =>
-      qualityOn && profile === 'comparison'
-        ? checkDateOnPage(pageBlocks.map((b) => b.text))
-        : null,
+      qualityOn && profile === 'comparison' ? checkDateOnPage(pageBlocks.map((b) => b.text)) : null,
     [qualityOn, profile, pageBlocks],
   );
   // A product page's shipping and returns (CE-052): Trust's check, and a
@@ -814,10 +814,57 @@ export function DraftEditor({
   // A proof to-do asked for this session stays, checked once it has a link.
   const [hadProofs, setHadProofs] = useState<ReadonlySet<string>>(() => new Set());
   // The ones shown open: the first MAX_PROOF_TODOS with no link, as the to-dos list them.
+  // Phase 3 (CE-052): a customer case is confirmed publishable, not linked.
+  const casesOn = sourcesOn && qualityPhase() >= 3;
+  const [caseConfirms, setCaseConfirms] = useState<ReadonlySet<string> | null>(null);
+  // Whether they're read (or failed): until then a case's to-do waits, so
+  // one confirmed before doesn't show open.
+  const [casesRead, setCasesRead] = useState(false);
+  useEffect(() => {
+    if (!casesOn) return;
+    let live = true;
+    void getDraftConfirmations(draft.id)
+      .then((rows) => {
+        if (!live) return;
+        setCasesRead(true);
+        // A confirm made before the read lands stays.
+        setCaseConfirms(
+          (prev) =>
+            new Set([
+              ...rows.filter((r) => r.kind === 'customer_case').map((r) => r.key),
+              ...(prev ?? []),
+            ]),
+        );
+      })
+      .catch((err) => {
+        // A failed call (the network, a deploy): the confirms made so far, so E-E-A-T scores.
+        console.error('Failed to read the confirmations:', err);
+        if (!live) return;
+        setCasesRead(true);
+        setCaseConfirms((prev) => prev ?? new Set());
+      });
+    return () => {
+      live = false;
+    };
+  }, [draft.id, casesOn]);
+  // The page's customer cases, and how many are confirmed: E-E-A-T's (CE-052).
+  const caseCount = useMemo(() => {
+    if (!casesOn) return null;
+    const asks = proofAsks.filter((ask) => ask.kind === 'customer_case');
+    const confirms = caseConfirms ?? new Set<string>();
+    return {
+      total: asks.length,
+      confirmed: asks.filter((ask) => caseConfirmed(confirms, ask)).length,
+    };
+  }, [casesOn, proofAsks, caseConfirms]);
+  const isCase = (ask: (typeof proofAsks)[number]) => casesOn && ask.kind === 'customer_case';
+  // A case's to-do once the confirms are read: open while not confirmed.
+  const caseOpen = (ask: (typeof proofAsks)[number]) =>
+    isCase(ask) ? casesRead && !caseConfirmed(caseConfirms ?? new Set(), ask) : !ask.linked;
   const newProofs = proofAsks
-    .filter((ask) => !ask.linked)
+    .filter(caseOpen)
     .slice(0, MAX_PROOF_TODOS)
-    .map(proofKey)
+    .map((ask) => (isCase(ask) ? caseKey(ask) : proofKey(ask)))
     .filter((key) => !hadProofs.has(key));
   if (newProofs.length > 0) setHadProofs(new Set([...hadProofs, ...newProofs]));
   // The page's images the person confirmed are their own, not stock (CE-049,
@@ -858,7 +905,13 @@ export function DraftEditor({
   const brandInfoRead = !waitsForSiteTrust(profile) || siteTrustRead;
   const eeatScore = useMemo(
     () =>
-      qualityOn && authorsRead && !inputsPending && (!sourcesOn || visualRead) && brandInfoRead
+      qualityOn &&
+      authorsRead &&
+      !inputsPending &&
+      (!sourcesOn || visualRead) &&
+      brandInfoRead &&
+      // Phase 3: the customer cases' confirms are read (CE-052).
+      (!casesOn || casesRead)
         ? weighed(
             eeat({
               author: pageAuthor,
@@ -869,6 +922,7 @@ export function DraftEditor({
               // The brand's own information: only a type that weighs it counts it.
               siteTrust,
               checkDate: checkDateRead === null ? null : checkDateRead.found,
+              cases: caseCount,
             }),
             weights.eeat,
           )
@@ -886,6 +940,9 @@ export function DraftEditor({
       authorConfirmed,
       siteTrust,
       checkDateRead,
+      casesOn,
+      casesRead,
+      caseCount,
       brandInfoRead,
       weights,
     ],
@@ -896,6 +953,24 @@ export function DraftEditor({
   const pageReviewer = authorsRead?.authors.find((a) => a.id === reviewerId) ?? null;
   // Confirm: only the person can tell their own image from stock.
   const [confirmingImages, setConfirmingImages] = useState(false);
+  // Quality's Confirm on a customer case (CE-052): the person's statement
+  // that the customer may be named; put back if it can't be saved.
+  const confirmCase = async (key: string) => {
+    if (caseConfirms?.has(key)) return;
+    setCaseConfirms((prev) => new Set([...(prev ?? []), key]));
+    const takeBack = () =>
+      setCaseConfirms((prev) => new Set([...(prev ?? [])].filter((had) => had !== key)));
+    try {
+      if ((await confirmDraftItem(draft.id, 'customer_case', key)) === 'full') {
+        takeBack();
+        toast.error(t('quality.confirmCaseFull'));
+      }
+    } catch (err) {
+      console.error('Failed to confirm the customer case:', err);
+      takeBack();
+      toast.error(t('quality.confirmCaseFailed'));
+    }
+  };
   const confirmImage = async (src: string) => {
     // Already confirmed: nothing to take back if the save fails.
     const had = ownImages?.has(src) ?? false;
@@ -1092,12 +1167,19 @@ export function DraftEditor({
         given: inputs ? inputsGiven(inputs) : null,
         trust: trustScore,
         brandFacts: brandFacts ? { pending: pendingFacts, had: hadPendingFacts } : null,
-        proofs: sourcesOn ? { asks: proofAsks, had: hadProofs } : null,
+        // A case's to-do waits for the confirms' read (CE-052).
+        proofs: sourcesOn
+          ? {
+              asks: casesOn && !casesRead ? proofAsks.filter((ask) => !isCase(ask)) : proofAsks,
+              had: hadProofs,
+            }
+          : null,
         visual,
         // Once the authors are read: who the reviewer is, and whether any can be.
         reviewer: regulated && authorsRead ? { topic: regulated, picked: !!pageReviewer } : null,
         confirmed: authorConfirmed,
         shipping: shippingRead,
+        cases: casesOn ? (caseConfirms ?? new Set<string>()) : null,
         checkDate:
           checkDateRead === null ? null : { ...checkDateRead, line: checkDateText(language) },
         off: checksOff(profile),
@@ -1105,6 +1187,9 @@ export function DraftEditor({
     : [];
   const quality: QualityRead | null = qualityOn
     ? {
+        caseSentences: casesOn
+          ? proofAsks.filter((ask) => ask.kind === 'customer_case').map((ask) => ask.sentence)
+          : [],
         weightsFor:
           qualityPhase() >= 3
             ? { type: pageType ?? null, detected: picked === null, profile }
@@ -1999,10 +2084,22 @@ export function DraftEditor({
       return;
     }
     const items = handOffList;
+    const context = agentContext(editor);
+    // The customer cases' paragraphs (CE-052): the person vouches for them,
+    // so the agent leaves them as it leaves a locked passage.
+    const cases = casesOn
+      ? proofAsks.filter((ask) => ask.kind === 'customer_case').map((ask) => ask.block)
+      : [];
     setHandingOff(true);
     try {
       await runAgentFix(
-        () => handOffDraft(draft.id, draft.brandId, { items, origin, ...agentContext(editor) }),
+        () =>
+          handOffDraft(draft.id, draft.brandId, {
+            items,
+            origin,
+            ...context,
+            locked: [...context.locked, ...cases],
+          }),
         handedOff,
         origin === 'auto',
       );
@@ -3277,6 +3374,7 @@ export function DraftEditor({
                 onPickAuthor={() => setAuthorMenuOpen(true)}
                 onPickReviewer={() => setReviewerMenuOpen(true)}
                 onAddCheckDate={htmlSource === null ? addCheckDate : undefined}
+                onConfirmCase={(key) => void confirmCase(key)}
                 onAddInput={addInput}
                 onAddSource={sourcesOn ? addSource : undefined}
                 onConfirmImages={() => setConfirmingImages(true)}
@@ -3320,6 +3418,7 @@ export function DraftEditor({
             onPickAuthor={() => setAuthorMenuOpen(true)}
             onPickReviewer={() => setReviewerMenuOpen(true)}
             onAddCheckDate={htmlSource === null ? addCheckDate : undefined}
+            onConfirmCase={(key) => void confirmCase(key)}
             onChangeType={() => setTypeMenuOpen(true)}
             handOff={handOffCard}
             yourInput={inputsRead.status === 'off' ? null : inputsRead}

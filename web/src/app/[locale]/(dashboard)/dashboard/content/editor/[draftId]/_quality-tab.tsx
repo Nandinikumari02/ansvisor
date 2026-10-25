@@ -36,6 +36,11 @@ import { MANAGE_AUTHORS_PATH } from './_author-menu';
 /** What Quality reads from the draft and its author, for the segment and the header. */
 export interface QualityRead {
   /**
+   * Phase 3 (CE-052): the page's customer cases' sentences: the person
+   * confirms them, so Hand off never sources or removes them.
+   */
+  caseSentences?: string[];
+  /**
    * Phase 3 (CE-052): the page type the checks and weights follow, whether
    * it was detected (not picked), and its profile; left out before.
    */
@@ -145,6 +150,7 @@ export function QualityTab({
   onAddImage,
   onPickReviewer,
   onAddCheckDate,
+  onConfirmCase,
   handOff = null,
   onConfirmAuthor,
   onChangeType,
@@ -176,6 +182,8 @@ export function QualityTab({
   onPickReviewer?: () => void;
   /** A comparison's check date to-do: Add line puts this month's under the answer (CE-052). */
   onAddCheckDate?: () => void;
+  /** A customer case's Confirm: the person says the customer may be named (CE-052). */
+  onConfirmCase?: (key: string) => void;
   /** Hand it off to Content Agent (CE-051): with Quality's phase 2. */
   handOff?: HandOff | null;
 }) {
@@ -274,6 +282,7 @@ export function QualityTab({
                 onAddImage={onAddImage}
                 onPickReviewer={onPickReviewer}
                 onAddCheckDate={onAddCheckDate}
+                onConfirmCase={onConfirmCase}
                 onConfirm={onConfirmAuthor}
               />
             ))}
@@ -435,6 +444,17 @@ export function useTodoCopy() {
       };
     }
     // The page's own claims, their proof asked for by kind and business (CE-049).
+    // A customer case in Phase 3 (CE-052): confirmed publishable, not linked.
+    if (todo.id === 'proof' && todo.proof && todo.action === 'confirmCase') {
+      return {
+        title: t('proof.confirmCase.title', { claim: todo.proof.claim }),
+        next: t('proof.confirmCase.next'),
+        detail: [
+          todo.done ? t('proof.confirmCase.done') : t('proof.confirmCase.detail'),
+          ...(todo.trustGain ? [t('proof.confirmCase.link', { gain: todo.trustGain })] : []),
+        ].join('. '),
+      };
+    }
     if (todo.id === 'proof' && todo.proof) {
       const { claim, kind } = todo.proof;
       return {
@@ -575,6 +595,7 @@ function TodoRow({
   onAddImage,
   onPickReviewer,
   onAddCheckDate,
+  onConfirmCase,
   onConfirm,
 }: {
   todo: QualityTodo;
@@ -589,6 +610,8 @@ function TodoRow({
   onPickReviewer?: () => void;
   /** A comparison's check date to-do: Add line puts this month's under the answer (CE-052). */
   onAddCheckDate?: () => void;
+  /** A customer case's Confirm: the person says the customer may be named (CE-052). */
+  onConfirmCase?: (key: string) => void;
   onConfirm?: (what: 'real' | 'profile', on: boolean) => void;
 }) {
   const t = useTranslations('contentEditor.editor.quality');
@@ -711,6 +734,18 @@ function TodoRow({
               {t('pickReviewer')}
             </Button>
           )
+        ) : todo.action === 'confirmCase' ? (
+          onConfirmCase &&
+          todo.key && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 shrink-0"
+              onClick={() => onConfirmCase(todo.key!)}
+            >
+              {t('confirmCase')}
+            </Button>
+          )
         ) : todo.action === 'addCheckDate' ? (
           onAddCheckDate && (
             <Button variant="outline" size="sm" className="h-7 shrink-0" onClick={onAddCheckDate}>
@@ -769,7 +804,7 @@ const againstHandOff = (check: ReadabilityCheck) =>
 export function qualitySuggestions(t: T, quality: QualityRead): Suggestion[] {
   return [
     ...readabilitySuggestions(t, quality.readability),
-    ...trustSuggestions(t, quality.trust, proofSentences(quality.todos), {
+    ...trustSuggestions(t, quality.trust, proofSentences(quality.todos, quality.caseSentences), {
       balanced: quality.aiChecks?.balanced ?? null,
       disclosure: quality.aiChecks?.disclosure ?? null,
       brand: quality.brandName,
@@ -1023,7 +1058,14 @@ function detail(t: T, check: ReadabilityCheck): string {
   return t(`checks.${check.id}.detail`);
 }
 
-/** The sentences the open proof to-dos ask the person to prove (CE-049). */
-export function proofSentences(todos: readonly QualityTodo[]): ReadonlySet<string> {
-  return new Set(todos.flatMap((todo) => (todo.proof && !todo.done ? [todo.proof.sentence] : [])));
+/** The sentences the open proof to-dos ask the person to prove (CE-049), and its customer cases'. */
+export function proofSentences(
+  todos: readonly QualityTodo[],
+  /** Phase 3 (CE-052): the page's customer cases' sentences, confirmed or not: the person's. */
+  cases: readonly string[] = [],
+): ReadonlySet<string> {
+  return new Set([
+    ...todos.flatMap((todo) => (todo.proof && !todo.done ? [todo.proof.sentence] : [])),
+    ...cases,
+  ]);
 }
