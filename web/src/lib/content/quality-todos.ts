@@ -31,6 +31,7 @@ export type QualityTodoId =
   | 'visualProof'
   | 'expertQuote'
   | 'proof'
+  | 'reviewer'
   | 'brandFacts';
 
 /**
@@ -47,6 +48,7 @@ export type QualityTodoAction =
   | 'addProof'
   | 'confirmImage'
   | 'addImage'
+  | 'pickReviewer'
   | 'reviewBrandFacts';
 
 export interface QualityTodo {
@@ -66,6 +68,8 @@ export interface QualityTodo {
   proof?: { claim: string; block: string; kind: ProofKind; sentence: string };
   /** How many it is about (placeholders, brand facts to approve). */
   count?: number;
+  /** What a regulated page advises on: its reviewer's field (CE-049). */
+  topic?: 'health' | 'finance' | 'legal';
   /**
    * With no author picked: the person's own word for the author their site
    * names (00271), a tick box beside the to-do, and whether it's ticked.
@@ -95,6 +99,7 @@ export function qualityTodos({
   brandFacts = null,
   proofs = null,
   visual = null,
+  reviewer = null,
   confirmed = null,
 }: {
   eeat: Score<EeatCheckId> | null;
@@ -129,6 +134,12 @@ export function qualityTodos({
    * person's own, and the visual proof spots open (as eeat takes them).
    */
   visual?: { images: number; own: number; openSpots: number } | null;
+  /**
+   * Phase 2 (CE-049): a page that advises consumers on health, finance or
+   * law (the page read's `regulated`) asks for a qualified reviewer, from
+   * Authors; null otherwise.
+   */
+  reviewer?: { topic: 'health' | 'finance' | 'legal'; picked: boolean } | null;
   /** What the person confirmed of the author their site names (00271), or null where they can't. */
   confirmed?: { real: boolean; profile: boolean } | null;
 }): QualityTodo[] {
@@ -178,7 +189,19 @@ export function qualityTodos({
       } satisfies QualityTodo,
     ];
   });
-  if (!eeat || eeat.score === null) return [...fill, ...proofTodos, ...facts];
+  const review: QualityTodo[] = reviewer
+    ? [
+        {
+          id: 'reviewer',
+          done: reviewer.picked,
+          gain: 0,
+          score: 'eeat',
+          action: reviewer.picked ? null : hasAuthors ? 'pickReviewer' : 'addAuthor',
+          topic: reviewer.topic,
+        },
+      ]
+    : [];
+  if (!eeat || eeat.score === null) return [...fill, ...proofTodos, ...review, ...facts];
   // No author picked: the one the site names may be confirmed instead, the
   // profile once the author is.
   const byConfirm = !author && !!confirmed;
@@ -240,6 +263,7 @@ export function qualityTodos({
         ] satisfies QualityTodo[])
       : []),
     ...proofTodos,
+    ...review,
     ...facts,
   ];
 }

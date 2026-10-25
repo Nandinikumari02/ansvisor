@@ -341,6 +341,29 @@ describe('qualityTodos', () => {
     });
   });
 
+  it('asks a page that advises on health, money or the law for a qualified reviewer (CE-049)', () => {
+    const review = (picked: boolean, hasAuthors = true) =>
+      qualityTodos({
+        eeat: eeat({ author: author() }),
+        author: author(),
+        hasAuthors,
+        reviewer: { topic: 'health', picked },
+        brandFacts: { pending: 1, had: true },
+      }).map(({ id, done, action, topic }) => ({ id, done, action, topic }));
+    expect(review(false).slice(-2)).toEqual([
+      { id: 'reviewer', done: false, action: 'pickReviewer', topic: 'health' },
+      { id: 'brandFacts', done: false, action: 'reviewBrandFacts', topic: undefined },
+    ]);
+    expect(review(false, false).at(-2)).toMatchObject({ id: 'reviewer', action: 'addAuthor' });
+    expect(review(true).at(-2)).toMatchObject({ id: 'reviewer', done: true, action: null });
+    // Not regulated: none.
+    expect(
+      qualityTodos({ eeat: eeat({ author: author() }), author: author(), hasAuthors: true }).map(
+        (t) => t.id,
+      ),
+    ).not.toContain('reviewer');
+  });
+
   it("keeps a linked proof checked when the next read carries its block with the link's space (review, #1468)", () => {
     const read = 'We are ISO 27001-certified for every plan.';
     const linked = 'We are ISO 27001 -certified for every plan.';
