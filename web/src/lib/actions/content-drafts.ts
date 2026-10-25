@@ -82,10 +82,12 @@ import {
   HISTORY_DAYS,
   HISTORY_LIMIT,
   isVersionOrigin,
+  type DraftHandOff,
   type DraftVersion,
   type RestoredDraft,
   type VersionOrigin,
 } from '@/lib/content/history';
+import { RUN_STALE_MS } from '@/lib/content/agent-runs';
 import type { AgentWriteRequest } from '@/lib/content/agent-write';
 import {
   actionPages,
@@ -233,7 +235,7 @@ export async function getContentDraft(id: string): Promise<ContentDraft | null> 
   const { data, error } = await supabase
     .from('content_drafts')
     .select(
-      `id, brand_id, title, page_type, page_type_source, method, status, body_html, author, author_id, reviewer_id, source_url, rules, kept_sources, author_real_at, author_profile_at, action_id, agent_state, agent_state_at, agent_run, updated_at, archived_at, ${BRAND_SITE}, actions(action_no)`,
+      `id, brand_id, title, page_type, page_type_source, method, status, body_html, author, author_id, reviewer_id, source_url, rules, kept_sources, author_real_at, author_profile_at, action_id, agent_state, agent_state_at, agent_run, updated_at, archived_at, quality_handoff, ${BRAND_SITE}, actions(action_no)`,
     )
     .eq('id', id)
     .maybeSingle();
@@ -265,6 +267,7 @@ export async function getContentDraft(id: string): Promise<ContentDraft | null> 
     agentRun: agentRunOf(data.agent_run),
     updatedAt: data.updated_at,
     archivedAt: data.archived_at,
+    qualityHandoff: data.quality_handoff === true,
   };
 }
 
@@ -1703,6 +1706,53 @@ export async function getDraftVersions(id: string): Promise<DraftVersion[]> {
       ? [{ id: row.id, origin: row.origin, title: row.title, createdAt: row.created_at }]
       : [],
   );
+}
+
+/**
+ * History's hand-offs (Quality CE-051): the draft's runs of Hand off (00275,
+ * its members may read them) in the last 90 days, the latest first, each
+ * with who started it, how it ended and how many checks it was given.
+ */
+export async function getDraftHandoffs(id: string): Promise<DraftHandOff[]> {
+  if (!draftId.safeParse(id).success) throw new Error('invalid');
+  const supabase = await createClient();
+  const since = new Date(Date.now() - HISTORY_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from('content_agent_runs')
+    .select('id, origin, outcome, steps, started_at, stopped_at')
+    .eq('draft_id', id)
+    .eq('kind', 'handoff')
+    .gte('started_at', since)
+    .order('started_at', { ascending: false })
+    .limit(HISTORY_LIMIT);
+  if (error) throw new Error(error.message);
+  return (data ?? []).map((row) => {
+    const steps = Array.isArray(row.steps)
+      ? (row.steps as { key?: unknown; count?: unknown }[])
+      : [];
+    const count = (key: string) => {
+      const n = steps.find((step) => step?.key === key)?.count;
+      return Number.isInteger(n) ? (n as number) : null;
+    };
+    // Stopped before its outcome was written; or left by a server that
+    // stopped, past the longest run (RUN_STALE_MS): not under way.
+    const outcome =
+      row.outcome === 'done' || row.outcome === 'stopped' || row.outcome === 'failed'
+        ? row.outcome
+        : row.stopped_at
+          ? 'stopped'
+          : Date.now() - Date.parse(row.started_at) > RUN_STALE_MS
+            ? 'failed'
+            : null;
+    return {
+      id: row.id,
+      origin: row.origin === 'auto' ? 'auto' : 'person',
+      outcome,
+      checks: count('read_checks'),
+      changes: outcome === 'done' ? count('write_changes') : null,
+      startedAt: row.started_at,
+    };
+  });
 }
 
 /**

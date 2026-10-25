@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { readAgentRun, stopAgentRun } from './agent-runs-client';
+import { readAgentRun, readAutoHandOff, stopAgentRun } from './agent-runs-client';
 
 /**
  * The Content Agent's run, read and stopped from the browser (CE-027/035):
@@ -7,19 +7,35 @@ import { readAgentRun, stopAgentRun } from './agent-runs-client';
  */
 
 let row: { data: Record<string, unknown> | null; error: Error | null };
+let rows: { data: Record<string, unknown>[] | null; error: Error | null };
+let filters: [string, string][];
+let brand: { data: Record<string, unknown> | null; error: Error | null };
 let session: { access_token: string } | null;
 const query = { draft: '', order: '', limit: 0 };
 vi.mock('@/lib/supabase/client', () => ({
   createClient: () => ({
     auth: { getSession: async () => ({ data: { session } }) },
     from: (table: string) => {
+      if (table === 'brands') {
+        const brandChain = {
+          select: () => brandChain,
+          eq: (col: string, value: string) => (filters.push([`brands.${col}`, value]), brandChain),
+          maybeSingle: async () => brand,
+        };
+        return brandChain;
+      }
       expect(table).toBe('content_agent_runs');
       const chain = {
         select: () => chain,
-        eq: (_col: string, value: string) => ((query.draft = value), chain),
+        eq: (col: string, value: string) => (
+          filters.push([col, value]),
+          (query.draft = value),
+          chain
+        ),
         order: (col: string) => ((query.order = col), chain),
         limit: (n: number) => ((query.limit = n), chain),
         maybeSingle: async () => row,
+        then: (resolve: (value: typeof rows) => void) => resolve(rows),
       };
       return chain;
     },
@@ -30,9 +46,39 @@ const fetchMock = vi.fn();
 
 beforeEach(() => {
   row = { data: null, error: null };
+  rows = { data: [], error: null };
+  brand = { data: { content_quality_handoff: true }, error: null };
+  filters = [];
+  query.draft = '';
   session = { access_token: 'token-1' };
   fetchMock.mockReset();
   vi.stubGlobal('fetch', fetchMock);
+});
+
+describe('readAutoHandOff (Quality CE-051)', () => {
+  it('says whether the automatic hand-off is behind the draft, null when that can’t be read', async () => {
+    expect(await readAutoHandOff('d1', 'b1')).toBe(false);
+    expect(filters).toEqual([
+      ['draft_id', 'd1'],
+      ['kind', 'handoff'],
+      ['origin', 'auto'],
+      ['brands.id', 'b1'],
+    ]);
+    // It had it.
+    rows = { data: [{ id: 'r1' }], error: null };
+    expect(await readAutoHandOff('d1', 'b1')).toBe(true);
+    // Its brand stopped handing off since the draft was made.
+    rows = { data: [], error: null };
+    brand = { data: { content_quality_handoff: false }, error: null };
+    expect(await readAutoHandOff('d1', 'b1')).toBe(true);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    rows = { data: null, error: new Error('down') };
+    expect(await readAutoHandOff('d1', 'b1')).toBeNull();
+    rows = { data: [], error: null };
+    brand = { data: null, error: new Error('down') };
+    expect(await readAutoHandOff('d1', 'b1')).toBeNull();
+    vi.mocked(console.error).mockRestore();
+  });
 });
 
 describe('readAgentRun', () => {

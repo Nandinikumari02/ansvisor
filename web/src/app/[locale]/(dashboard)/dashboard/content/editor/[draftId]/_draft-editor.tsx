@@ -153,6 +153,7 @@ import { ReviewerMenu } from './_reviewer-menu';
 import { BeforePublish, TRUST_GATE, type ReadyAnyway, type ReadyToPaste } from './_before-publish';
 import { FlashBlock, findBlock, flashKey } from './_flash-block';
 import { useAgentRun } from './_use-agent-run';
+import { useAutoHandOff } from './_use-auto-hand-off';
 import { useLinkChecks } from './_use-link-checks';
 import { WorkingDots } from './_working-dots';
 import { DropOverlay, useAttachments } from './_attach';
@@ -1775,7 +1776,12 @@ export function DraftEditor({
   const runAgentFix = async (
     send: () => Promise<{ count: number } | { error: HandOffError }>,
     told: (count: number) => string = fixedMessage,
+    // The editor's own run (the automatic hand-off): what the person didn't
+    // start isn't said when it doesn't run or finds nothing, only logged.
+    quiet = false,
   ) => {
+    const failed = (key: string, error: string) =>
+      quiet ? console.warn('The automatic hand-off did not run:', error) : toast.error(t(key));
     setStoppingRun(null);
     stopSent.current = null;
     setFixing(true);
@@ -1798,7 +1804,7 @@ export function DraftEditor({
         // No answer is not a failure: its batch shows if it lands in time.
         const landed = await agentBatch(draft.id, asked + FIX_WAIT_MS);
         if (!landed) {
-          toast.error(t('suggestions.fixErrors.failed'));
+          failed('suggestions.fixErrors.failed', 'failed');
           return;
         }
         setSuggestions(landed);
@@ -1814,7 +1820,7 @@ export function DraftEditor({
         return;
       }
       if ('error' in result) {
-        toast.error(t(`suggestions.fixErrors.${result.error}`));
+        failed(`suggestions.fixErrors.${result.error}`, result.error);
         // Another tab (or the API) left them: show them here to decide.
         if (result.error === 'open_suggestions') {
           setSuggestions(await getDraftSuggestions(draft.id));
@@ -1823,7 +1829,7 @@ export function DraftEditor({
         return;
       }
       if (result.count === 0) {
-        toast(t('suggestions.nothingToFix'));
+        if (!quiet) toast(t('suggestions.nothingToFix'));
         return;
       }
       setSuggestions(await getDraftSuggestions(draft.id));
@@ -1834,7 +1840,7 @@ export function DraftEditor({
       nudgeAt('agent');
     } catch (err) {
       console.error('Failed to run the Content Agent:', err);
-      toast.error(t('suggestions.fixErrors.failed'));
+      failed('suggestions.fixErrors.failed', 'failed');
     } finally {
       setFixing(false);
       setStoppingRun(null);
@@ -1879,6 +1885,7 @@ export function DraftEditor({
       await runAgentFix(
         () => handOffDraft(draft.id, draft.brandId, { items, origin, ...agentContext(editor) }),
         handedOff,
+        origin === 'auto',
       );
     } finally {
       setHandingOff(false);
@@ -2002,6 +2009,26 @@ export function DraftEditor({
           todos: quality.todos.filter((todo) => !todo.done).length,
         }
       : null;
+  // Quality's automatic hand-off (CE-051): once a draft its brand hands off,
+  // whose page came from elsewhere (imported to optimize, or the agent's).
+  useAutoHandOff({
+    draftId: draft.id,
+    brandId: draft.brandId,
+    due:
+      sourcesOn &&
+      draft.qualityHandoff &&
+      status !== 'published' &&
+      (draft.method === 'optimize' || draft.author === 'agent'),
+    ready:
+      qualitySettled &&
+      !!handOffCard &&
+      !handOffCard.blocked &&
+      !handOffCard.running &&
+      !agentWorking &&
+      htmlSource === null,
+    count: handOffList.length,
+    run: () => handOff('auto'),
+  });
   // The card's Run Agent says why it won't run, as the Rules card does: also
   // when the only rules left open are ones the agent doesn't fix (one H1).
   const agentRules = openRulesForAgent(rules.rules);
