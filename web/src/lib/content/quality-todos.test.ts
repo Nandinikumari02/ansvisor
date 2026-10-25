@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ContentAuthor } from './authors';
 import type { PageProof } from './page-read';
 import { eeat, trust, trustBlocks } from './quality-checks';
+import { PROFILE_WEIGHTS, checksOff, weighed } from './quality-profiles';
 import { proofKey, qualityTodos } from './quality-todos';
 
 /** Your to-dos (Quality spec §4, CE-040): only what the person can do, read from the checks. */
@@ -27,6 +28,24 @@ describe('qualityTodos', () => {
     expect(todos(null)).toEqual([
       { id: 'byline', done: false, gain: 60, score: 'eeat', action: 'pickAuthor' },
       { id: 'authorProfile', done: false, gain: 40, score: 'eeat', action: null },
+    ]);
+  });
+
+  it('asks for no author on a page type that goes out under the brand (CE-052)', () => {
+    const product = qualityTodos({
+      eeat: weighed(
+        eeat({ author: null, used: { experience: false, data: false } }),
+        PROFILE_WEIGHTS.product.eeat,
+      ),
+      author: null,
+      hasAuthors: true,
+      used: { experience: false, data: false, quote: false },
+      off: checksOff('product'),
+    });
+    // Experience and data are half its live E-E-A-T each.
+    expect(product.map((t) => [t.id, t.gain])).toEqual([
+      ['experience', 50],
+      ['originalData', 50],
     ]);
   });
 

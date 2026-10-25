@@ -114,6 +114,14 @@ import {
   unplacedSites,
   type ClaimMark,
 } from '@/lib/content/quality-checks';
+import {
+  PROFILE_WEIGHTS,
+  checksOff,
+  profileFor,
+  waitsForSiteTrust,
+  weighed,
+  weighedTrust,
+} from '@/lib/content/quality-profiles';
 import { proofKey, qualityTodos } from '@/lib/content/quality-todos';
 import { isByline, readability, sentencesOf } from '@/lib/content/readability';
 import { brandFactsPath, factMismatches } from '@/lib/content/brand-facts';
@@ -741,9 +749,19 @@ export function DraftEditor({
     language,
     brandName,
   ]);
+  // Phase 3 (CE-052): what the scores count, and how much, follows the
+  // page's type (an article's before, and for most types).
+  const profile = profileFor(pageType);
+  const weights = PROFILE_WEIGHTS[profile];
   const readable = useMemo(
-    () => (qualityOn ? readability(pageHtml, language, aiChecks?.answerFirst ?? null) : null),
-    [qualityOn, pageHtml, language, aiChecks],
+    () =>
+      qualityOn
+        ? weighed(
+            readability(pageHtml, language, aiChecks?.answerFirst ?? null),
+            weights.readability,
+          )
+        : null,
+    [qualityOn, pageHtml, language, aiChecks, weights],
   );
   // A proof to-do asked for this session stays, checked once it has a link.
   const [hadProofs, setHadProofs] = useState<ReadonlySet<string>>(() => new Set());
@@ -787,17 +805,24 @@ export function DraftEditor({
   // E-E-A-T from the author (and, in phase 2, the person's experience and
   // data, and their own images); with Trust and Readability, the scores and
   // the header chip's average (CE-039).
-  // In phase 2 it waits for the visual proof too, so it doesn't move once that lands.
+  // In phase 2 it waits for the visual proof too, so it doesn't move once that lands;
+  // on a type that weighs the brand's own information, for the site's trust.
+  const brandInfoRead = !waitsForSiteTrust(profile) || siteTrustRead;
   const eeatScore = useMemo(
     () =>
-      qualityOn && authorsRead && !inputsPending && (!sourcesOn || visualRead)
-        ? eeat({
-            author: pageAuthor,
-            used,
-            visual,
-            how: aiChecks?.how ?? null,
-            confirmed: authorConfirmed,
-          })
+      qualityOn && authorsRead && !inputsPending && (!sourcesOn || visualRead) && brandInfoRead
+        ? weighed(
+            eeat({
+              author: pageAuthor,
+              used,
+              visual,
+              how: aiChecks?.how ?? null,
+              confirmed: authorConfirmed,
+              // The brand's own information: only a type that weighs it counts it.
+              siteTrust,
+            }),
+            weights.eeat,
+          )
         : null,
     [
       qualityOn,
@@ -810,6 +835,9 @@ export function DraftEditor({
       visual,
       aiChecks,
       authorConfirmed,
+      siteTrust,
+      brandInfoRead,
+      weights,
     ],
   );
   // A page that advises consumers on health, finance or law (the page's read)
@@ -862,21 +890,25 @@ export function DraftEditor({
   const trustScore = useMemo(
     () =>
       qualityOn && brandDomains && !inputsPending
-        ? trust({
-            blocks: pageBlocks,
-            links: linkChecks,
-            brandDomains,
-            siteTrust,
-            quote: used ? used.quote : null,
-            sources: sourceRead,
-            claims: claimBlocks,
-            brandFacts: factCheck,
-            proofs: proofAsks,
-            page: aiChecks,
-            now: Date.now(),
-          })
+        ? weighedTrust(
+            trust({
+              blocks: pageBlocks,
+              links: linkChecks,
+              brandDomains,
+              siteTrust,
+              quote: used ? used.quote : null,
+              sources: sourceRead,
+              claims: claimBlocks,
+              brandFacts: factCheck,
+              proofs: proofAsks,
+              page: aiChecks,
+              now: Date.now(),
+            }),
+            weights.trust,
+          )
         : null,
     [
+      weights,
       qualityOn,
       pageBlocks,
       linkChecks,
@@ -1012,10 +1044,15 @@ export function DraftEditor({
         // Once the authors are read: who the reviewer is, and whether any can be.
         reviewer: regulated && authorsRead ? { topic: regulated, picked: !!pageReviewer } : null,
         confirmed: authorConfirmed,
+        off: checksOff(profile),
       })
     : [];
   const quality: QualityRead | null = qualityOn
     ? {
+        weightsFor:
+          qualityPhase() >= 3
+            ? { type: pageType ?? null, detected: picked === null, profile }
+            : null,
         readability: readable,
         eeat: eeatScore,
         trust: trustScore,
@@ -1043,6 +1080,8 @@ export function DraftEditor({
     : null;
   // Quality's Pick author opens the header's menu.
   const [authorMenuOpen, setAuthorMenuOpen] = useState(false);
+  // Quality's Change opens the header's page type menu (CE-052).
+  const [typeMenuOpen, setTypeMenuOpen] = useState(false);
   // Quality's Pick reviewer opens its menu beside the author's (CE-049).
   const [reviewerMenuOpen, setReviewerMenuOpen] = useState(false);
   // As the author's: a slower pick that fails after a later one landed doesn't roll it back.
@@ -2890,6 +2929,8 @@ export function DraftEditor({
             isNew={draft.method === 'create'}
             sourceUrl={draft.sourceUrl}
             onPick={(type) => void pickPageType(type)}
+            open={typeMenuOpen}
+            onOpenChange={setTypeMenuOpen}
           />
           {authorsRead && (
             <AuthorMenu
@@ -3197,6 +3238,7 @@ export function DraftEditor({
             onShowPlaceholder={showFirstPlaceholder}
             onPickAuthor={() => setAuthorMenuOpen(true)}
             onPickReviewer={() => setReviewerMenuOpen(true)}
+            onChangeType={() => setTypeMenuOpen(true)}
             handOff={handOffCard}
             yourInput={inputsRead.status === 'off' ? null : inputsRead}
             onAddInput={addInput}
@@ -3253,8 +3295,14 @@ export function DraftEditor({
               quality.trust?.score != null && quality.trust.score < TRUST_GATE
                 ? quality.trust.score
                 : null,
-            noAuthor: quality.eeat !== null && !quality.author && !authorConfirmed.real,
-            noDisclosure: aiChecks?.disclosure?.found === false,
+            // A page type that goes out under the brand (CE-052) wants no author.
+            noAuthor:
+              quality.eeat !== null &&
+              !quality.author &&
+              !authorConfirmed.real &&
+              !checksOff(profile).has('byline'),
+            noDisclosure:
+              aiChecks?.disclosure?.found === false && !checksOff(profile).has('disclosure'),
             article: isArticlePage(pageType),
             onReview: () => {
               setExportOpen(null);
