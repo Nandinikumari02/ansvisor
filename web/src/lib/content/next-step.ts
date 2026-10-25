@@ -136,7 +136,7 @@ export function stepState(id: NextStepId, s: NextStepState): string {
       // a skip made before then holds.
       return `${s.quality?.trustLow ?? false}:${openTodos(s)
         .filter((todo) => todo.id !== 'brandFacts')
-        .map((todo) => todo.id)
+        .map((todo) => todo.key ?? todo.id)
         .join(',')}`;
     default:
       return '';

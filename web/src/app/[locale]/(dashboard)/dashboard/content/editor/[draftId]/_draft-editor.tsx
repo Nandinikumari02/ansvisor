@@ -106,9 +106,10 @@ import {
   unplacedSites,
   type ClaimMark,
 } from '@/lib/content/quality-checks';
-import { qualityTodos } from '@/lib/content/quality-todos';
+import { proofKey, qualityTodos } from '@/lib/content/quality-todos';
 import { readability, sentencesOf } from '@/lib/content/readability';
 import { brandFactsPath, factMismatches } from '@/lib/content/brand-facts';
+import { MAX_PROOF_TODOS, proofsOnPage } from '@/lib/content/page-read';
 import {
   liveSkips,
   nextStep,
@@ -161,6 +162,7 @@ import { WeakSourcesMarks, weakSourcesKey } from './_weak-sources';
 import { ClaimMarksExtension, claimMarksKey, textRanges, writingBlock } from './_claim-marks';
 import { useClaims } from './_use-claims';
 import { useBrandFacts } from './_use-brand-facts';
+import { usePageRead } from './_use-page-read';
 import { useSourceClasses } from './_use-source-classes';
 import { HeaderTip } from './_header-tip';
 import {
@@ -676,6 +678,25 @@ export function DraftEditor({
     editor && !editor.isDestroyed && editor.isFocused ? writingBlock(editor) : null,
   );
   const { blocks: claimBlocks, recheck: recheckClaims } = claimsRead;
+  // The page's own claims that need the brand's proof (CE-049), read from
+  // the whole page after a save: proof to-dos while their paragraph has no
+  // link, and its own-site link counts as their source.
+  // Only changes on their way hold the ask, as the claims': not a failed
+  // save, a conflict or a page too large.
+  const pageRead = usePageRead(draft.id, autosave.savedAt, sourcesOn, saving);
+  const proofAsks = useMemo(
+    () => (pageRead.read ? proofsOnPage(pageBlocks, pageRead.read.proofs) : []),
+    [pageRead.read, pageBlocks],
+  );
+  // A proof to-do asked for this session stays, checked once it has a link.
+  const [hadProofs, setHadProofs] = useState<ReadonlySet<string>>(() => new Set());
+  // The ones shown open: the first MAX_PROOF_TODOS with no link, as the to-dos list them.
+  const newProofs = proofAsks
+    .filter((ask) => !ask.linked)
+    .slice(0, MAX_PROOF_TODOS)
+    .map(proofKey)
+    .filter((key) => !hadProofs.has(key));
+  if (newProofs.length > 0) setHadProofs(new Set([...hadProofs, ...newProofs]));
   // Out of the editor (to Quality, to Before you publish): the block left
   // for later is read too.
   useEffect(() => {
@@ -710,6 +731,7 @@ export function DraftEditor({
             sources: sourceRead,
             claims: claimBlocks,
             brandFacts: factCheck,
+            proofs: proofAsks,
             now: Date.now(),
           })
         : null,
@@ -724,6 +746,7 @@ export function DraftEditor({
       sourceRead,
       claimBlocks,
       factCheck,
+      proofAsks,
     ],
   );
   // Their links underlined in the draft, Quality's suggestion naming them.
@@ -842,6 +865,7 @@ export function DraftEditor({
         given: inputs ? inputsGiven(inputs) : null,
         trust: trustScore,
         brandFacts: brandFacts ? { pending: pendingFacts, had: hadPendingFacts } : null,
+        proofs: sourcesOn ? { asks: proofAsks, had: hadProofs } : null,
         confirmed: authorConfirmed,
       })
     : [];
@@ -862,6 +886,10 @@ export function DraftEditor({
         claimsPaused: claimsRead.paused,
         claimsLimited: claimsRead.limited,
         claimsReading: claimsRead.reading,
+        pagePaused: pageRead.paused,
+        pageLimited: pageRead.limited,
+        pageReading: pageRead.reading,
+        siteType,
         brandFactsPath: sourcesOn ? brandFactsPath(draft.brandId) : null,
         authorConfirmed,
         authorConfirming: confirming,
@@ -894,8 +922,10 @@ export function DraftEditor({
     linksPending === 0 &&
     !claimsRead.reading &&
     !sourcesReading &&
-    // Phase 2: the brand's approved facts, which Trust checks the page against.
+    // Phase 2: the brand's approved facts, which Trust checks the page
+    // against, and the page's read (its proof to-dos; what it finds scores).
     !(sourcesOn && factsState.status === 'loading') &&
+    !pageRead.reading &&
     // Phase 2 reads the page as saved: an edit's score waits for its save.
     !(sourcesOn && saving);
   const [shownQuality, setShownQuality] = useState<{ score: number | null } | null>(null);
@@ -2062,7 +2092,9 @@ export function DraftEditor({
     // a minute): they move Trust, which a proof skip was made at. Only the
     // dropping waits; the Next step shows meanwhile, each skip held against
     // its step's state as it is.
-    factsState.status !== 'loading';
+    factsState.status !== 'loading' &&
+    // The proof to-dos (CE-049) come with the page's read, seconds after it opens.
+    (!qualityOn || pageRead.settled);
   const staleSkips =
     nextRead && Object.keys(liveSkips(nextState)).length !== Object.keys(skipped).length;
   useEffect(() => {
@@ -2759,6 +2791,7 @@ export function DraftEditor({
                 onShowPlaceholder={showFirstPlaceholder}
                 onPickAuthor={() => setAuthorMenuOpen(true)}
                 onAddInput={addInput}
+                onAddSource={sourcesOn ? addSource : undefined}
                 onLater={nudge.later}
                 onAct={nudge.close}
               />

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import messages from '../../../../../../../../messages/en.json';
 import { eeat, trust, trustBlocks, type LinkCheck } from '@/lib/content/quality-checks';
 import type { ContentAuthor } from '@/lib/content/authors';
+import { proofsOnPage } from '@/lib/content/page-read';
 import { qualityTodos } from '@/lib/content/quality-todos';
 import type { Readability } from '@/lib/content/readability';
 
@@ -90,6 +91,7 @@ const onPickAuthor = vi.fn();
 const onShowPlaceholder = vi.fn();
 const onAddInput = vi.fn();
 const onKeep = vi.fn();
+const onAddSource = vi.fn();
 const onConfirmAuthor = vi.fn();
 
 async function render(quality: QualityRead | Readability | null) {
@@ -104,6 +106,7 @@ async function render(quality: QualityRead | Readability | null) {
           onPickAuthor={onPickAuthor}
           onAddInput={onAddInput}
           onKeep={onKeep}
+          onAddSource={onAddSource}
           onConfirmAuthor={onConfirmAuthor}
         />
       </NextIntlClientProvider>,
@@ -115,6 +118,7 @@ beforeEach(() => {
   onShow.mockReset();
   onPickAuthor.mockReset();
   onKeep.mockReset();
+  onAddSource.mockReset();
   onConfirmAuthor.mockReset();
   container = document.createElement('div');
   root = createRoot(container);
@@ -555,6 +559,68 @@ describe('QualityTab', () => {
     expect(container.textContent).toContain(
       "Sources the rules can't place wait for an AI check: this month's AI usage is used up.",
     );
+  });
+
+  it("asks for the proof of the page's own claims by kind and business, with Add proof link (CE-049)", async () => {
+    const html =
+      '<p>Ledgerly is 40% faster than spreadsheets.</p>' +
+      '<p>Every plan is SOC 2 certified.</p>' +
+      '<p>Teams forecast 3x more often.</p>';
+    const blocks = trustBlocks(html);
+    const proofs = proofsOnPage(blocks, [
+      { claim: '40% faster', block: blocks[0].text, kind: 'test' },
+      { claim: 'SOC 2 certified', block: blocks[1].text, kind: 'certification' },
+      { claim: 'the best', block: 'a paragraph since rewritten', kind: 'ranking' },
+    ]);
+    const trustScore = trust({
+      blocks,
+      links: new Map(),
+      brandDomains: ['acme.com'],
+      proofs,
+      now: Date.parse('2026-10-24T12:00:00Z'),
+    });
+    const quality = (siteType: QualityRead['siteType']): QualityRead => ({
+      ...read(null),
+      trust: trustScore,
+      siteType,
+      pageLimited: true,
+      todos: qualityTodos({
+        eeat: null,
+        author: null,
+        hasAuthors: true,
+        trust: trustScore,
+        proofs: { asks: proofs, had: new Set() },
+      }),
+    });
+    await render(quality('b2b'));
+    const todos = container.querySelector('[aria-label="Your to-dos"]')!;
+    const rows = [...todos.querySelectorAll('li')].map((li) => li.textContent);
+    expect(rows).toEqual([
+      expect.stringMatching(
+        /^Link your test result for “40% faster” · To doOnly you have this proof/,
+      ),
+      expect.stringMatching(/^Link the audit report or trust page for “SOC 2 certified”/),
+    ]);
+    // The page's other figure is still the agent's to source: one sentence, its share of the gain.
+    const suggestions = container.querySelector('[aria-label="What would raise it"]')!;
+    expect(suggestions.textContent).toContain('1 sentence with a figure has no source');
+    expect(container.textContent).toContain("Today's AI reads of this page are used up.");
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Add a proof link to “40% faster”"]')!
+        .click(),
+    );
+    expect(onAddSource).toHaveBeenCalledWith({
+      text: '40% faster',
+      sentence: 'Ledgerly is 40% faster than spreadsheets.',
+      block: 'Ledgerly is 40% faster than spreadsheets.',
+    });
+
+    await render(quality('ecommerce'));
+    expect(container.textContent).toContain(
+      'Link the certificate or lab result for “SOC 2 certified”',
+    );
+    expect(container.textContent).toContain('Link the test report for “40% faster”');
   });
 
   it("shows the site's trust, what is missing and the way to Site Audit", async () => {

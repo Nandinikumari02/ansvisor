@@ -1,10 +1,14 @@
 import type { ContentAuthor } from './authors';
+import { MAX_PROOF_TODOS, type PageProof, type ProofKind } from './page-read';
 import {
   authorProfile,
   scoreGain,
+  sentenceGain,
   type EeatCheckId,
   type Score,
   type TrustCheckId,
+  type TrustRead,
+  squeeze,
 } from './quality-checks';
 
 /**
@@ -25,6 +29,7 @@ export type QualityTodoId =
   | 'experience'
   | 'originalData'
   | 'expertQuote'
+  | 'proof'
   | 'brandFacts';
 
 /**
@@ -38,6 +43,7 @@ export type QualityTodoAction =
   | 'addAuthor'
   | 'editAuthor'
   | 'addInput'
+  | 'addProof'
   | 'reviewBrandFacts';
 
 export interface QualityTodo {
@@ -51,6 +57,10 @@ export interface QualityTodo {
   action: QualityTodoAction | null;
   /** Given in Brief › Your input, though the page doesn't use it yet (CE-048). */
   given?: boolean;
+  /** Its own key when it has more than one row (each proof's). */
+  key?: string;
+  /** The claim a proof to-do asks proof for (CE-049). */
+  proof?: { claim: string; block: string; kind: ProofKind; sentence: string };
   /** How many it is about (placeholders, brand facts to approve). */
   count?: number;
   /**
@@ -67,7 +77,8 @@ export interface QualityTodo {
  * count holds. Done ones stay on the list, checked; placeholders are listed
  * once the page has had some (`had`, this session), the brand facts to
  * approve likewise, last (Phase 2: the brand's, worth no points of the
- * page's). The author's wait for E-E-A-T to be read.
+ * page's). The proof of the page's own claims comes after the person's
+ * input (Phase 2, CE-049). The author's wait for E-E-A-T to be read.
  */
 export function qualityTodos({
   eeat,
@@ -79,6 +90,7 @@ export function qualityTodos({
   given = null,
   trust = null,
   brandFacts = null,
+  proofs = null,
   confirmed = null,
 }: {
   eeat: Score<EeatCheckId> | null;
@@ -95,13 +107,19 @@ export function qualityTodos({
   used?: { experience: boolean; data: boolean; quote: boolean } | null;
   /** What the person gave there (inputsGiven), used or not. */
   given?: { experience: boolean; data: boolean; quote: boolean } | null;
-  /** Trust, for an expert quote's gain. */
-  trust?: Score<TrustCheckId> | null;
+  /** Trust, for an expert quote's gain and a proof's (its unsourced sentences). */
+  trust?: (Score<TrustCheckId> & Partial<Pick<TrustRead, 'unsourced' | 'figures'>>) | null;
   /**
    * Phase 2 (CE-047): the brand's facts read from its site that no one has
    * approved or rejected yet, and whether there were some this session.
    */
   brandFacts?: { pending: number; had: boolean } | null;
+  /**
+   * Phase 2 (CE-049): the page's own claims that need the brand's proof, as
+   * the page is now (proofsOnPage), and the keys of the ones asked for this
+   * session: done ones stay listed, checked.
+   */
+  proofs?: { asks: readonly PageProof[]; had: ReadonlySet<string> } | null;
   /** What the person confirmed of the author their site names (00271), or null where they can't. */
   confirmed?: { real: boolean; profile: boolean } | null;
 }): QualityTodo[] {
@@ -132,7 +150,26 @@ export function qualityTodos({
           },
         ]
       : [];
-  if (!eeat || eeat.score === null) return [...fill, ...facts];
+  // The page's own claims, in its order: open while its paragraph has no
+  // link, checked once it has; MAX_PROOF_TODOS open at once.
+  let open = 0;
+  const proofTodos: QualityTodo[] = (proofs?.asks ?? []).flatMap((ask) => {
+    const key = proofKey(ask);
+    if (ask.linked && !proofs?.had.has(key)) return [];
+    if (!ask.linked && (open += 1) > MAX_PROOF_TODOS) return [];
+    return [
+      {
+        id: 'proof',
+        key,
+        done: ask.linked,
+        gain: ask.linked ? 0 : sentenceGain(trust, ask.sentence),
+        score: 'trust',
+        action: 'addProof',
+        proof: { claim: ask.claim, block: ask.block, kind: ask.kind, sentence: ask.sentence },
+      } satisfies QualityTodo,
+    ];
+  });
+  if (!eeat || eeat.score === null) return [...fill, ...proofTodos, ...facts];
   // No author picked: the one the site names may be confirmed instead, the
   // profile once the author is.
   const byConfirm = !author && !!confirmed;
@@ -187,6 +224,26 @@ export function qualityTodos({
           },
         ] satisfies QualityTodo[])
       : []),
+    ...proofTodos,
     ...facts,
   ];
 }
+
+/** A text's 32-bit FNV-1a hash, in base 36: a short, stable name for it. */
+function shortHash(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+/**
+ * A proof to-do's key: its claim in its block, both by their words without
+ * spaces, the block by a short hash (the nudge keeps the keys it showed). A
+ * link put on the claim adds a space at its edge, and the API's next answer
+ * carries the claim and its block as the page has them then: the key stays.
+ */
+export const proofKey = (ask: { claim: string; block: string }) =>
+  `proof:${squeeze(ask.claim)}:${shortHash(squeeze(ask.block))}`;

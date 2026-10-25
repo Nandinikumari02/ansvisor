@@ -10,6 +10,7 @@ import type { DraftSuggestion } from '@/lib/content/suggestions';
 import { passageKey, type CitedPassage } from '@/lib/content/cited-passages';
 import { encodeHtmlBlock } from '@/lib/content/html-allowlist';
 import { CLAIMS_EVERY_MS } from './_use-claims';
+import { PROOF_READ_EVERY_MS, PROOF_READ_SLACK_MS } from './_use-page-read';
 import ContentEditorPage from './page';
 
 const getContentDraft = vi.fn();
@@ -21,6 +22,7 @@ const setContentDraftAuthor = vi.fn();
 const keepDraftSource = vi.fn();
 const confirmDraftAuthor = vi.fn();
 const checkDraftClaims = vi.fn();
+const readDraftPage = vi.fn();
 const getBrandFacts = vi.fn();
 const checkDraftLinks = vi.fn();
 const getSiteTrust = vi.fn();
@@ -92,6 +94,7 @@ vi.mock('@/lib/actions/content-drafts', () => ({
   keepDraftSource: (...args: unknown[]) => keepDraftSource(...args),
   confirmDraftAuthor: (...args: unknown[]) => confirmDraftAuthor(...args),
   checkDraftClaims: (...args: unknown[]) => checkDraftClaims(...args),
+  readDraftPage: (...args: unknown[]) => readDraftPage(...args),
   checkDraftLinks: (...args: unknown[]) => checkDraftLinks(...args),
 }));
 vi.mock('next/navigation', () => ({ useParams: () => ({ draftId: 'd1' }) }));
@@ -293,6 +296,7 @@ beforeEach(() => {
   keepDraftSource.mockReset();
   confirmDraftAuthor.mockReset().mockResolvedValue(undefined);
   checkDraftClaims.mockReset().mockResolvedValue({ blocks: [], pending: 0, limited: false });
+  readDraftPage.mockReset().mockResolvedValue({ error: 'off' });
   getBrandFacts.mockReset().mockResolvedValue({
     facts: [],
     pages: [],
@@ -2769,6 +2773,68 @@ describe('the side panel', () => {
       }
     });
 
+    it('holds the score until the page as saved is read for proof, then settles once (review, #1468)', async () => {
+      process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '2';
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        getContentAuthors.mockResolvedValue({
+          authors: [],
+          brands: [{ id: 'b1', name: 'Acme' }],
+          me: { id: 'u1', role: 'admin' },
+        });
+        const read = {
+          spots: [],
+          proofs: [],
+          regulated: null,
+          pending: false,
+          limited: false,
+          paused: false,
+        };
+        let pageIn: (value: unknown) => void = () => {};
+        readDraftPage
+          .mockResolvedValueOnce(read)
+          .mockReturnValueOnce(new Promise((resolve) => (pageIn = resolve)));
+        getContentDraft.mockResolvedValue(readable);
+        saveContentDraft.mockResolvedValue({
+          ok: true,
+          updatedAt: '2026-10-20T10:01:00Z',
+          bodyHash: 'h1',
+        });
+        window.innerWidth = 1440;
+        await renderPage();
+        await act(async () => void (await vi.advanceTimersByTimeAsync(3_000)));
+        expect(readDraftPage).toHaveBeenCalledTimes(1);
+        expect(qualityChip()?.textContent).not.toContain('updating');
+        const shown = qualityChip()?.textContent;
+        const editor = (container.querySelector('.ProseMirror') as HTMLElement & { editor: Editor })
+          .editor;
+        await act(async () => {
+          editor.commands.insertContentAt(
+            editor.state.doc.content.size,
+            '<p>Forecasts missed by less each quarter.</p>',
+          );
+        });
+        await act(async () => void (await vi.advanceTimersByTimeAsync(2_000)));
+        expect(saveContentDraft).toHaveBeenCalledTimes(1);
+        // The claims are in; the page's read for the save waits for the API's minute.
+        await act(async () => void (await vi.advanceTimersByTimeAsync(CLAIMS_EVERY_MS)));
+        expect(checkDraftClaims).toHaveBeenCalledTimes(2);
+        expect(qualityChip()?.textContent).toContain('updating as the page is read');
+        await act(
+          async () =>
+            void (await vi.advanceTimersByTimeAsync(PROOF_READ_EVERY_MS + PROOF_READ_SLACK_MS)),
+        );
+        expect(readDraftPage).toHaveBeenCalledTimes(2);
+        // Asked, not answered: the last settled score stays.
+        expect(qualityChip()?.textContent).toContain(shown!.replace(/ ·.*$/, ''));
+        expect(qualityChip()?.textContent).toContain('updating as the page is read');
+        await act(async () => pageIn(read));
+        expect(qualityChip()?.textContent).not.toContain('updating');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     /** The draft above, its Language rule changed for this draft. */
     const inLanguage = (language: { on?: boolean; value?: string }) => ({
       ...readable,
@@ -2934,6 +3000,72 @@ describe('the side panel', () => {
         '.ProseMirror a[href="https://g2.example/forecasting"]',
       );
       expect(link?.textContent).toBe('the fastest forecasting app');
+    });
+
+    it("asks for the proof of the brand's own claim, and Add proof link selects it (CE-049)", async () => {
+      process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE = '2';
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const block = `${said} It is easy to set up for any team.`;
+      checkDraftClaims.mockResolvedValue({
+        blocks: [
+          { text: block, claims: [{ text: 'the fastest forecasting app', kind: 'superlative' }] },
+        ],
+        pending: 0,
+        limited: false,
+      });
+      readDraftPage.mockResolvedValue({
+        spots: [],
+        proofs: [{ claim: 'the fastest forecasting app', block, kind: 'ranking' }],
+        regulated: null,
+        pending: false,
+        limited: false,
+        paused: false,
+      });
+      getContentDraft.mockResolvedValue(claimed);
+      window.innerWidth = 1440;
+      await renderPage();
+      await act(async () => void (await vi.advanceTimersByTimeAsync(3_000)));
+      expect(readDraftPage).toHaveBeenCalledWith('d1');
+      const chip = [...container.querySelectorAll<HTMLButtonElement>('header button')].find((b) =>
+        b.textContent?.startsWith('Quality'),
+      )!;
+      await act(async () => chip.click());
+      const row = [...panel()!.querySelectorAll('li')].find((li) =>
+        li.textContent?.includes('Link the ranking or test behind “the fastest forecasting app”'),
+      )!;
+      expect(row.textContent).toContain('Link its proof, or soften the claim');
+      // Its sentence is the person's to prove: not the agent's to source as well.
+      expect(panel()!.textContent).not.toContain('claim has no source');
+      await act(async () =>
+        [...row.querySelectorAll('button')]
+          .find((b) => b.textContent === 'Add proof link')!
+          .click(),
+      );
+      expect(document.querySelector('#content-link-href')).not.toBeNull();
+      const { state } = (
+        container.querySelector('.ProseMirror') as HTMLElement & { editor: Editor }
+      ).editor;
+      expect(state.doc.textBetween(state.selection.from, state.selection.to)).toBe(
+        'the fastest forecasting app',
+      );
+      // Linked to its proof: the row is checked, not gone.
+      const field = document.querySelector<HTMLInputElement>('#content-link-href')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(
+          field,
+          'https://www.acme.com/benchmarks',
+        );
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () =>
+        [...document.querySelectorAll('button')].find((b) => b.textContent === 'Apply')!.click(),
+      );
+      // The page is read again once typing pauses.
+      await act(async () => void (await vi.advanceTimersByTimeAsync(3_000)));
+      const done = [...panel()!.querySelectorAll('li')].find((li) =>
+        li.textContent?.includes('the fastest forecasting app'),
+      )!;
+      expect(done.textContent).toContain('The proof is linked');
     });
 
     it('takes the claim’s sentence out on Remove', async () => {
@@ -4309,9 +4441,12 @@ describe('the side panel', () => {
         localStorage.setItem('aeo:next-step-skips:d1', JSON.stringify({ plan: 'true' }));
         let factsIn!: (read: unknown) => void;
         getBrandFacts.mockReturnValue(new Promise((resolve) => (factsIn = resolve)));
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
         await act(async () => root.unmount());
         root = createRoot(container);
         await renderPage();
+        // The page's read for proof is in, a few seconds after it opens.
+        await act(async () => void (await vi.advanceTimersByTimeAsync(3_000)));
         expect(skips()).toEqual({ plan: 'true' });
         await act(async () =>
           factsIn({
@@ -4325,6 +4460,7 @@ describe('the side panel', () => {
         );
         expect(skips()).toEqual({});
       } finally {
+        vi.useRealTimers();
         delete process.env.NEXT_PUBLIC_CONTENT_QUALITY_PHASE;
       }
     });
