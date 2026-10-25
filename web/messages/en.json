@@ -5023,6 +5023,18 @@
     }
   },
   "content": {
+    "imageUpload": {
+      "button": "Upload from your computer",
+      "uploading": "Uploading…",
+      "hint": "JPG, PNG, WebP or GIF, up to 5 MB. Anyone with its address can see it, like any image on a web page.",
+      "errors": {
+        "type": "Use a JPG, PNG, WebP or GIF image.",
+        "size": "That image is over 5 MB. Use a smaller one.",
+        "plan": "Uploads come with an active plan. Paste the image's address instead.",
+        "limit": "That's today's uploads for your workspace. Paste the image's address, or upload again tomorrow.",
+        "failed": "Couldn't upload the image. Try again."
+      }
+    },
     "title": "Content Opportunities",
     "description": "AI-powered content recommendations to improve your visibility in AI-generated answers.",
     "opportunities": "Opportunities",
