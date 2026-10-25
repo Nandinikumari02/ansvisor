@@ -480,6 +480,14 @@ export function useTodoCopy() {
             : t('visualProof.detail.add'),
       };
     }
+    // A product page's shipping and returns (CE-052): only the person knows them.
+    if (todo.id === 'shippingReturns') {
+      return {
+        title: t('shippingReturns.title'),
+        next: t('shippingReturns.next'),
+        detail: todo.done ? t('shippingReturns.done') : t('shippingReturns.detail'),
+      };
+    }
     // How the page was made (CE-050): the page read finds it or not.
     if (todo.id === 'whoHowWhy') {
       return {
@@ -951,6 +959,11 @@ function line(t: T, check: ReadabilityCheck): string {
       return t('checks.headingSpacing.line', { count: check.count, words: SECTION_WORDS });
     case 'passiveJargon':
       return t('checks.passiveJargon.line', { passive: check.count, jargon: check.value });
+    case 'typeRules':
+      return t('checks.typeRules.line', {
+        count: check.count,
+        names: (check.rules ?? []).map((r) => r.name).join(', '),
+      });
   }
 }
 
@@ -967,6 +980,14 @@ function detail(t: T, check: ReadabilityCheck): string {
     return check.formula
       ? t('checks.readingLevel.detail', { target: check.target ?? 60 })
       : t('checks.readingLevel.detailLength');
+  }
+  // Each rule with its aim and how the page reads now: what Hand off sends the agent too.
+  if (check.id === 'typeRules') {
+    return t('checks.typeRules.detail', {
+      rules: (check.rules ?? [])
+        .map((r) => (r.detail ? `${r.name} (${r.detail})` : r.name))
+        .join('; '),
+    });
   }
   return t(`checks.${check.id}.detail`);
 }

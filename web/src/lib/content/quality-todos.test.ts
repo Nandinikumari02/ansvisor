@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ContentAuthor } from './authors';
 import type { PageProof } from './page-read';
 import { eeat, trust, trustBlocks } from './quality-checks';
-import { PROFILE_WEIGHTS, checksOff, weighed } from './quality-profiles';
+import { PROFILE_WEIGHTS, checksOff, weighed, weighedTrust } from './quality-profiles';
 import { proofKey, qualityTodos } from './quality-todos';
 
 /** Your to-dos (Quality spec §4, CE-040): only what the person can do, read from the checks. */
@@ -47,6 +47,60 @@ describe('qualityTodos', () => {
       ['experience', 50],
       ['originalData', 50],
     ]);
+  });
+
+  it('asks a product page to say how shipping and returns work: only the person knows (CE-052)', () => {
+    const base = {
+      eeat: weighed(
+        eeat({ author: null, used: { experience: true, data: true } }),
+        PROFILE_WEIGHTS.product.eeat,
+      ),
+      author: null,
+      hasAuthors: true,
+    };
+    const ships = (shipping: boolean, returns: boolean) =>
+      qualityTodos({ ...base, shipping: { shipping, returns }, off: checksOff('product') }).find(
+        (t) => t.id === 'shippingReturns',
+      );
+    expect(ships(true, false)).toMatchObject({ done: false, score: 'trust', action: null });
+    expect(ships(true, true)).toMatchObject({ done: true, gain: 0 });
+    // With Trust scored, its gain is the check's share.
+    const scored = weighedTrust(
+      trust({
+        blocks: trustBlocks('<p>Win rates rose 42% last year.</p>'),
+        links: new Map(),
+        brandDomains: ['acme.com'],
+        shipping: { shipping: true, returns: false },
+        now: Date.parse('2026-10-25'),
+      }),
+      PROFILE_WEIGHTS.product.trust,
+    );
+    expect(
+      qualityTodos({
+        ...base,
+        trust: scored,
+        shipping: { shipping: true, returns: false },
+        off: checksOff('product'),
+      }).find((t) => t.id === 'shippingReturns')!.gain,
+    ).toBeGreaterThan(0);
+    // Before E-E-A-T is read, the type's checks are left out all the same.
+    expect(
+      qualityTodos({
+        eeat: null,
+        author: null,
+        hasAuthors: true,
+        shipping: { shipping: false, returns: false },
+        off: checksOff('feature'),
+      }),
+    ).toEqual([]);
+    // Another type doesn't ask.
+    expect(
+      qualityTodos({
+        ...base,
+        shipping: { shipping: false, returns: false },
+        off: checksOff('feature'),
+      }).some((t) => t.id === 'shippingReturns'),
+    ).toBe(false);
   });
 
   it('asks to add an author when the workspace has none', () => {

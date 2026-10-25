@@ -468,6 +468,39 @@ describe('page type rules', () => {
     ).toEqual({ state: 'bad', code: 'current', count: 40 });
   });
 
+  it('asks a product with sizes for fit questions, and one without none (#1494 review)', () => {
+    const sized = '<table><tr><th>Sizes</th><td>XS–XL</td></tr></table>';
+    expect(check('fitQuestions', sized, '3', 'product_page')).toEqual({
+      state: 'bad',
+      code: 'partOf',
+      count: 0,
+      of: 3,
+    });
+    expect(
+      check('fitQuestions', '<p>A burr grinder for espresso.</p>', '3', 'product_page'),
+    ).toEqual({ state: 'info', code: 'noSizes' });
+  });
+
+  it('reads a buying FAQ under its heading in the page’s language (#1494 review)', () => {
+    const faq = (heading: string, language: string) =>
+      checkRule(
+        rule('buyingFaq', 'category_page', '2'),
+        page(`<h2>${heading}</h2><h3>Q1?</h3><p>A.</p><h3>Q2?</h3><p>B.</p>`),
+        { ...ctx, language },
+      );
+    for (const [heading, language] of [
+      ['Häufig gestellte Fragen', 'de'],
+      ['Questions fréquentes', 'fr'],
+      ['Preguntas frecuentes', 'es'],
+      ['SIKÇA SORULAN SORULAR', 'tr'],
+    ]) {
+      expect(faq(heading, language)).toEqual({ state: 'ok' });
+    }
+    // A language whose heading isn't read: its FAQ isn't said to be missing.
+    expect(faq('Vanliga frågor', 'sv')).toEqual({ state: 'info', code: 'englishOnly' });
+    expect(faq('Materials', 'en')).toEqual({ state: 'bad', code: 'missing' });
+  });
+
   it('checks a destination page’s summary', () => {
     expect(
       check(
@@ -529,6 +562,14 @@ describe('the formats www.ansvisor.com offers', () => {
     expect(define('<h1>Cold brew</h1><p>Cold brew is, simply, coffee steeped cold.</p>')).toEqual({
       state: 'ok',
     });
+    // Fit questions too: a Turkish product page isn't scored on English words (CE-052).
+    expect(
+      checkRule(
+        rule('fitQuestions', 'product_page'),
+        page('<h1>Yürüyüş çantası</h1><h2>Hangi beden bana uyar?</h2><p>Ölçü tablosuna bakın.</p>'),
+        { ...ctx, language: 'tr' },
+      ),
+    ).toEqual({ state: 'info', code: 'englishOnly' });
     // Read in English words only: another language's page isn't counted.
     expect(
       checkRule(

@@ -145,7 +145,7 @@ describe('QualityTab', () => {
       p.textContent?.startsWith('Checks and weights for'),
     )!;
     expect(line.textContent).toBe(
-      "Checks and weights for Product page (detected): no author (your brand's), your own product photos, proof for claims, prices that match, short plain copy. Change",
+      "Checks and weights for Product page (detected): no author (your brand's), your own product photos, proof for claims, prices that match, shipping and returns, a specs table and short plain copy. Change",
     );
     await act(async () => line.querySelector('button')!.click());
     expect(onChangeType).toHaveBeenCalled();
@@ -160,6 +160,31 @@ describe('QualityTab', () => {
     // Before Phase 3: no line.
     await render(read(result));
     expect(container.textContent).not.toContain('Checks and weights for');
+  });
+
+  it('names the page type’s rules not met yet, and a product page’s shipping to-do (CE-052)', async () => {
+    const typed: Readability = {
+      ...result,
+      checks: [
+        ...result.checks,
+        {
+          id: 'typeRules',
+          points: 0,
+          max: 10,
+          value: 1,
+          count: 1,
+          rules: [{ name: 'Specs table', detail: 'Now: missing' }],
+        },
+      ],
+    };
+    await render({
+      ...read(typed),
+      todos: [{ id: 'shippingReturns', done: false, gain: 4, score: 'trust', action: null }],
+    });
+    expect(container.textContent).toContain('1 page type rule not met: Specs table');
+    // Each with how the page reads now: what Hand off sends the agent too.
+    expect(container.textContent).toContain('Specs table (Now: missing). This page type');
+    expect(container.textContent).toContain('Say how shipping and returns work');
   });
 
   it('shows the three scores with their bands, labelled an Ansvisor estimate', async () => {

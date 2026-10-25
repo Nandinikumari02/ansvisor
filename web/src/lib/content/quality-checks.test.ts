@@ -8,6 +8,7 @@ import {
   authorProfile,
   eeat,
   linksToCheck,
+  shippingOnPage,
   scoreGain,
   sentenceGain,
   trust,
@@ -692,5 +693,112 @@ describe('the page read’s AI checks (Phase 2, CE-050)', () => {
     expect(
       read({ balanced: { found: true }, disclosure: null }, '<p>No figure here.</p>').score,
     ).toBeNull();
+  });
+});
+
+describe('shippingOnPage (Phase 3, CE-052)', () => {
+  const read = (html: string) => shippingOnPage(html);
+
+  it('reads how shipping and returns work in a policy’s terms, headings and links too', () => {
+    expect(read('<p>Free shipping in 2 days. Free returns within 30 days.</p>')).toEqual({
+      shipping: true,
+      returns: true,
+    });
+    expect(
+      read(
+        '<h2>Returns</h2><p>Ships within 24 hours.</p><p>30-day returns, no questions asked.</p>',
+      ),
+    ).toEqual({
+      shipping: true,
+      returns: true,
+    });
+    expect(
+      read(
+        '<p>See <a href="/policies/shipping_policy">delivery</a> and <a href="/pages/returns-and-refunds">this</a>.</p>',
+      ),
+    ).toEqual({ shipping: true, returns: true });
+    expect(
+      read('<p>Details: <a href="#versandkosten">Versand</a>, <a href="/reembolso">aquí</a>.</p>'),
+    ).toEqual({
+      shipping: true,
+      returns: true,
+    });
+    // Turkish, capital İ at a sentence's start too.
+    expect(read('<p>Kargo ücretsiz. İade koşulları: 14 gün.</p>')).toEqual({
+      shipping: true,
+      returns: true,
+    });
+  });
+
+  it('reads the common ways shops state their terms (#1494 review)', () => {
+    const shipping = [
+      '<h3>Delivery &amp; Returns</h3><p>We send every order with tracking.</p>',
+      '<p>Standard delivery 3–5 working days.</p>',
+      '<p>Free UK delivery on orders over £50.</p>',
+      '<p>Delivery: 2–4 working days.</p>',
+      '<p>Expédition sous 24h.</p>',
+      '<p>Entrega en 24/48 horas.</p>',
+      '<p>Versand innerhalb von 2 Tagen.</p>',
+      '<p>Siparişiniz 2 iş gününde teslim edilir.</p>',
+      '<h2>Shipping</h2><p>Orders leave our warehouse daily.</p>',
+    ];
+    for (const html of shipping) expect(read(html)?.shipping).toBe(true);
+    const returns = [
+      '<p>Returns are accepted within 30 days.</p>',
+      '<h2>Returns &amp; Exchanges</h2><p>Send it back unused.</p>',
+      '<p>Retours acceptés, satisfait ou remboursé.</p>',
+      '<p>Reembolso en 14 días.</p>',
+      '<p>Kostenlose Retoure und Umtausch.</p>',
+      '<p>Ücretsiz değişim hakkı.</p>',
+    ];
+    for (const html of returns) expect(read(html)?.returns).toBe(true);
+  });
+
+  it('reads no policy in everyday words', () => {
+    for (const html of [
+      '<p>Ships with a USB-C cable. In return, you get a two-year warranty.</p>',
+      '<p>A strong return on investment, served from a content delivery network.</p>',
+      '<p>Press Return to save. Trade it on any stock exchange.</p>',
+      '<p>A sturdy daypack for wet hikes.</p>',
+      // A spec, a product's link, a product named for the word.
+      '<table><tr><td>Shipping weight</td><td>1.2 kg</td></tr></table>',
+      '<p>See our <a href="/collections/delivery-bags">delivery bags</a>.</p>',
+      '<p>Kargo pantolon, yüzde 100 pamuk.</p>',
+      // A policy's heading with nothing under it.
+      '<h2>Shipping</h2><h2>Materials</h2><p>Recycled nylon.</p>',
+    ]) {
+      expect(read(html)).toEqual({ shipping: false, returns: false });
+    }
+  });
+
+  it('reads a page in a language its words aren’t written for by its links alone', () => {
+    expect(shippingOnPage('<p>Spedizione gratuita in 24 ore.</p>', 'it')).toBeNull();
+    expect(
+      shippingOnPage('<p>Vedi <a href="/policies/shipping-policy">spedizione</a>.</p>', 'it'),
+    ).toEqual({ shipping: true, returns: false });
+  });
+});
+
+describe('trust: a product page’s shipping and returns (Phase 3, CE-052)', () => {
+  const NOW = Date.parse('2026-10-25');
+
+  it('counts half for one of the two, and is left out where not read', () => {
+    const run = (shipping: { shipping: boolean; returns: boolean } | null) =>
+      trust({
+        blocks: trustBlocks('<p>Win rates rose 42% last year.</p>'),
+        links: new Map(),
+        brandDomains: ['acme.com'],
+        shipping,
+        now: NOW,
+      });
+    expect(
+      run({ shipping: true, returns: false }).checks.find((c) => c.id === 'shippingReturns'),
+    ).toEqual({
+      id: 'shippingReturns',
+      points: 5,
+      max: 10,
+    });
+    expect(run(null).checks.some((c) => c.id === 'shippingReturns')).toBe(false);
+    expect(run(null).shipping).toBeNull();
   });
 });

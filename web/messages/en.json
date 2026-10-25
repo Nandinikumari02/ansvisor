@@ -4706,10 +4706,10 @@
           "change": "Change",
           "changeLabel": "Change the page type",
           "article": "an author with experience, sourced claims, short sentences and the answer first.",
-          "product": "no author (your brand's), your own product photos, proof for claims, prices that match, short plain copy.",
-          "category": "your own product images, your brand's information on its site, prices and claims that match.",
-          "feature": "your own screenshots and data, sourced metrics, a price that matches, scannable sections.",
-          "comparison": "an author who says how the picks were made, balance and a disclosure, the summary first."
+          "product": "no author (your brand's), your own product photos, proof for claims, prices that match, shipping and returns, a specs table and short plain copy.",
+          "category": "your own product images, your brand's information on its site, prices and claims that match, an intro and a buying FAQ.",
+          "feature": "your own screenshots and data, sourced metrics, a price that matches, a comparison table, proof per section and use case steps in scannable sections.",
+          "comparison": "an author who says how the picks were made, balance and a disclosure, a side-by-side table, the summary first."
         },
         "tooShort": "Write a few paragraphs: Readability is read from the page as you write.",
         "tooShortShort": "Too short yet",
@@ -4754,6 +4754,12 @@
             "detail": "A real person's words as said, with their name, title and where they said them",
             "given": "It's in Your input, but the page doesn't quote it word for word yet",
             "done": "The page quotes an expert word for word"
+          },
+          "shippingReturns": {
+            "title": "Say how shipping and returns work",
+            "next": "say how shipping and returns work",
+            "detail": "The delivery time and cost and the return window, in the page or as links to your shipping and returns pages. Only you know them: the agent leaves them to you",
+            "done": "The page says how shipping and returns work"
           },
           "brandFacts": {
             "title": "{count, plural, =0 {Review your brand facts} one {Approve # brand fact} other {Approve # brand facts}}",
@@ -4986,6 +4992,10 @@
           "passiveJargon": {
             "line": "{passive, plural, one {# passive sentence} other {# passive sentences}} · {jargon, plural, one {# jargon word} other {# jargon words}}",
             "detail": "Say who does what, in plain words."
+          },
+          "typeRules": {
+            "line": "{count, plural, one {# page type rule not met} other {# page type rules not met}}: {names}",
+            "detail": "{rules}. This page type's own rules, as the Rules tab reads them: meet them there, or Run Agent in Rules."
           }
         }
       },
@@ -5095,6 +5105,7 @@
           "addKeywords": "Add keywords",
           "notHowTo": "Not a how-to",
           "englishOnly": "English only",
+          "noSizes": "No sizes",
           "numberCheck": "Number check"
         },
         "mineName": "My rules · {type}",
