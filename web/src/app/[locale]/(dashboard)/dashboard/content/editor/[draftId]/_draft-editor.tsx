@@ -107,7 +107,8 @@ import {
   type ClaimMark,
 } from '@/lib/content/quality-checks';
 import { qualityTodos } from '@/lib/content/quality-todos';
-import { readability } from '@/lib/content/readability';
+import { readability, sentencesOf } from '@/lib/content/readability';
+import { brandFactsPath, factMismatches } from '@/lib/content/brand-facts';
 import {
   liveSkips,
   nextStep,
@@ -159,6 +160,7 @@ import { PageInfoStrip, pageInfoKey } from './_page-info';
 import { WeakSourcesMarks, weakSourcesKey } from './_weak-sources';
 import { ClaimMarksExtension, claimMarksKey, textRanges, writingBlock } from './_claim-marks';
 import { useClaims } from './_use-claims';
+import { useBrandFacts } from './_use-brand-facts';
 import { useSourceClasses } from './_use-source-classes';
 import { HeaderTip } from './_header-tip';
 import {
@@ -627,6 +629,25 @@ export function DraftEditor({
   // person kept.
   const sourcesOn = qualityPhase() >= 2;
   const competitorDomains = reads.sources?.data?.competitorDomains;
+  // Phase 2 (CE-047): the page's prices, trial and founding year against the
+  // brand's approved facts, read from its own site.
+  const factsState = useBrandFacts(draft.brandId, sourcesOn);
+  const brandFacts = factsState.status === 'ready' ? factsState.read.facts : null;
+  const factCheck = useMemo(
+    () =>
+      brandFacts
+        ? factMismatches({
+            sentences: pageBlocks.flatMap((b) => sentencesOf(b.text)),
+            facts: brandFacts,
+            brandName,
+            competitorDomains: competitorDomains ?? [],
+          })
+        : null,
+    [brandFacts, pageBlocks, brandName, competitorDomains],
+  );
+  const pendingFacts = brandFacts?.filter((f) => f.status === 'pending').length ?? 0;
+  const [hadPendingFacts, setHadPendingFacts] = useState(false);
+  if (pendingFacts > 0 && !hadPendingFacts) setHadPendingFacts(true);
   const [keptSources, setKeptSources] = useState(draft.keptSources);
   // A site the rules can't place, as the model reads it (part b): asked
   // after a save, as the links are.
@@ -688,6 +709,7 @@ export function DraftEditor({
             quote: used ? used.quote : null,
             sources: sourceRead,
             claims: claimBlocks,
+            brandFacts: factCheck,
             now: Date.now(),
           })
         : null,
@@ -701,6 +723,7 @@ export function DraftEditor({
       used,
       sourceRead,
       claimBlocks,
+      factCheck,
     ],
   );
   // Their links underlined in the draft, Quality's suggestion naming them.
@@ -818,6 +841,7 @@ export function DraftEditor({
         used,
         given: inputs ? inputsGiven(inputs) : null,
         trust: trustScore,
+        brandFacts: brandFacts ? { pending: pendingFacts, had: hadPendingFacts } : null,
         confirmed: authorConfirmed,
       })
     : [];
@@ -838,6 +862,7 @@ export function DraftEditor({
         claimsPaused: claimsRead.paused,
         claimsLimited: claimsRead.limited,
         claimsReading: claimsRead.reading,
+        brandFactsPath: sourcesOn ? brandFactsPath(draft.brandId) : null,
         authorConfirmed,
         authorConfirming: confirming,
       }
@@ -856,7 +881,7 @@ export function DraftEditor({
   // The score the header and the panel show (CE-039): once the reads that
   // move it are in, or failed (the authors and, in phase 2, Your input for
   // E-E-A-T; the site's trust, the sources, the links and, in phase 2, the
-  // claims and the sites' kinds for Trust). Until the first time it says
+  // claims, the sites' kinds and the brand's facts for Trust). Until the first time it says
   // it's reading; after, it keeps the last settled score while new reads
   // land (a link added, the agent's page), so it never jumps through the
   // partial averages on the way.
@@ -869,6 +894,8 @@ export function DraftEditor({
     linksPending === 0 &&
     !claimsRead.reading &&
     !sourcesReading &&
+    // Phase 2: the brand's approved facts, which Trust checks the page against.
+    !(sourcesOn && factsState.status === 'loading') &&
     // Phase 2 reads the page as saved: an edit's score waits for its save.
     !(sourcesOn && saving);
   const [shownQuality, setShownQuality] = useState<{ score: number | null } | null>(null);
@@ -2030,7 +2057,12 @@ export function DraftEditor({
     reads.brief.status !== 'loading' &&
     reads.sources !== null &&
     rules.ready &&
-    (!qualityOn || (todosRead && siteTrustRead && linksPending === 0));
+    (!qualityOn || (todosRead && siteTrustRead && linksPending === 0)) &&
+    // In phase 2 the brand's facts too (their first read of the site can take
+    // a minute): they move Trust, which a proof skip was made at. Only the
+    // dropping waits; the Next step shows meanwhile, each skip held against
+    // its step's state as it is.
+    factsState.status !== 'loading';
   const staleSkips =
     nextRead && Object.keys(liveSkips(nextState)).length !== Object.keys(skipped).length;
   useEffect(() => {

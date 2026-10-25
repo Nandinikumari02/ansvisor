@@ -14,7 +14,8 @@ import {
  * the placeholders the agent left where it had no real name, quote or
  * number (CE-044), and the author's: the Content Agent can't add, pick or
  * edit authors. Phase 2 adds what only the person can give (Brief › Your
- * input, CE-048): their experience, their data and an expert's quote.
+ * input, CE-048): their experience, their data and an expert's quote; and
+ * the brand's facts read from its site, to approve (CE-047).
  */
 
 export type QualityTodoId =
@@ -23,18 +24,21 @@ export type QualityTodoId =
   | 'authorProfile'
   | 'experience'
   | 'originalData'
-  | 'expertQuote';
+  | 'expertQuote'
+  | 'brandFacts';
 
 /**
  * A to-do's one button: Show (the first placeholder, selected to type over),
- * the header's author menu, or Settings › Authors.
+ * the header's author menu, Settings › Authors, Brief › Your input, or
+ * Brand settings › Brand facts.
  */
 export type QualityTodoAction =
   | 'showPlaceholder'
   | 'pickAuthor'
   | 'addAuthor'
   | 'editAuthor'
-  | 'addInput';
+  | 'addInput'
+  | 'reviewBrandFacts';
 
 export interface QualityTodo {
   id: QualityTodoId;
@@ -47,7 +51,7 @@ export interface QualityTodo {
   action: QualityTodoAction | null;
   /** Given in Brief › Your input, though the page doesn't use it yet (CE-048). */
   given?: boolean;
-  /** How many it is about (placeholders). */
+  /** How many it is about (placeholders, brand facts to approve). */
   count?: number;
   /**
    * With no author picked: the person's own word for the author their site
@@ -61,8 +65,9 @@ export interface QualityTodo {
  * export never ships one), pick its author (or add one when the workspace
  * has none), then complete their profile, listed from the start so the
  * count holds. Done ones stay on the list, checked; placeholders are listed
- * once the page has had some (`had`, this session). The author's wait for
- * E-E-A-T to be read.
+ * once the page has had some (`had`, this session), the brand facts to
+ * approve likewise, last (Phase 2: the brand's, worth no points of the
+ * page's). The author's wait for E-E-A-T to be read.
  */
 export function qualityTodos({
   eeat,
@@ -73,6 +78,7 @@ export function qualityTodos({
   used = null,
   given = null,
   trust = null,
+  brandFacts = null,
   confirmed = null,
 }: {
   eeat: Score<EeatCheckId> | null;
@@ -91,6 +97,11 @@ export function qualityTodos({
   given?: { experience: boolean; data: boolean; quote: boolean } | null;
   /** Trust, for an expert quote's gain. */
   trust?: Score<TrustCheckId> | null;
+  /**
+   * Phase 2 (CE-047): the brand's facts read from its site that no one has
+   * approved or rejected yet, and whether there were some this session.
+   */
+  brandFacts?: { pending: number; had: boolean } | null;
   /** What the person confirmed of the author their site names (00271), or null where they can't. */
   confirmed?: { real: boolean; profile: boolean } | null;
 }): QualityTodo[] {
@@ -107,7 +118,21 @@ export function qualityTodos({
           },
         ]
       : [];
-  if (!eeat || eeat.score === null) return fill;
+  // The brand's, not the page's, and worth no points itself: last.
+  const facts: QualityTodo[] =
+    brandFacts && (brandFacts.pending || brandFacts.had)
+      ? [
+          {
+            id: 'brandFacts',
+            done: brandFacts.pending === 0,
+            gain: 0,
+            score: 'trust',
+            action: 'reviewBrandFacts',
+            count: brandFacts.pending,
+          },
+        ]
+      : [];
+  if (!eeat || eeat.score === null) return [...fill, ...facts];
   // No author picked: the one the site names may be confirmed instead, the
   // profile once the author is.
   const byConfirm = !author && !!confirmed;
@@ -162,5 +187,6 @@ export function qualityTodos({
           },
         ] satisfies QualityTodo[])
       : []),
+    ...facts,
   ];
 }
