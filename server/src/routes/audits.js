@@ -1202,7 +1202,7 @@ router.get('/:id', async (req, res) => {
       .from('audit_signal_results')
       .select('*')
       .eq('audit_id', id);
-      let previous = null;
+    let previous = null;
     if (audit.status === 'completed' && audit.total_score !== null) {
       try {
         const { data: rows, error } = await readBrandAudits(audit.brand_id);
